@@ -1,0 +1,102 @@
+<?php
+
+declare(strict_types=1);
+
+namespace StackRadar\Laravel\Tests;
+
+use Illuminate\Contracts\Http\Kernel;
+use Illuminate\Contracts\Queue\Job;
+use Illuminate\Http\Request;
+use Illuminate\Queue\Events\JobProcessed;
+use Illuminate\Queue\Events\Looping;
+use Illuminate\Support\Facades\Route;
+use Laravel\Octane\ApplicationGateway;
+use Laravel\Octane\OctaneServiceProvider;
+use RuntimeException;
+
+final class LifecycleTest extends TestCase
+{
+    public function test_http_reports_at_termination_and_keeps_the_response_intact(): void
+    {
+        Route::get('/healthy', fn () => 'healthy');
+        $request = Request::create('/healthy');
+        $kernel = $this->app->make(Kernel::class);
+        $response = $kernel->handle($request);
+        self::assertSame('healthy', $response->getContent());
+        self::assertSame([], $this->transport->payloads);
+
+        $kernel->terminate($request, $response);
+        self::assertCount(1, $this->transport->payloads);
+        self::assertSame('web', $this->transport->payloads[0]['context']->role);
+
+        $second = Request::create('/healthy');
+        $kernel->terminate($second, $kernel->handle($second));
+        self::assertCount(1, $this->transport->payloads);
+    }
+
+    public function test_transport_failure_cannot_break_an_http_response(): void
+    {
+        $this->transport->failure = new RuntimeException('Sensitive failure detail');
+        Route::get('/healthy', fn () => 'healthy');
+        $this->get('/healthy')->assertOk()->assertSee('healthy');
+    }
+
+    public function test_queue_lifecycle_reports_once_and_does_not_throw_on_failure(): void
+    {
+        $this->transport->failure = new RuntimeException('Upload failed');
+        $this->app['events']->dispatch(new Looping('database', 'default'));
+        $this->app['events']->dispatch(new Looping('database', 'default'));
+        self::assertCount(1, $this->transport->payloads);
+        self::assertSame('queue', $this->transport->payloads[0]['context']->role);
+    }
+
+    public function test_sync_jobs_do_not_create_queue_runtime_reports(): void
+    {
+        $this->app['config']->set('queue.connections.custom-sync.driver', 'sync');
+        $this->app['events']->dispatch(new JobProcessed('custom-sync', $this->createMock(Job::class)));
+        self::assertSame([], $this->transport->payloads);
+    }
+
+    public function test_one_off_worker_jobs_report_after_processing(): void
+    {
+        $this->app['config']->set('queue.connections.database.driver', 'database');
+        $this->app['events']->dispatch(new JobProcessed('database', $this->createMock(Job::class)));
+        self::assertCount(1, $this->transport->payloads);
+    }
+
+    public function test_the_octane_gateway_terminates_the_reporting_middleware_between_requests(): void
+    {
+        $this->app->register(OctaneServiceProvider::class);
+        Route::get('/healthy', fn () => 'healthy');
+
+        for ($i = 0; $i < 2; $i++) {
+            $sandbox = clone $this->app;
+            $gateway = new ApplicationGateway($this->app, $sandbox);
+            $request = Request::create('/healthy');
+            $gateway->terminate($request, $gateway->handle($request));
+        }
+
+        self::assertCount(1, $this->transport->payloads);
+        self::assertSame('web', $this->transport->payloads[0]['context']->role);
+    }
+
+    public function test_the_manual_command_reports_cli_and_bypasses_the_due_gate(): void
+    {
+        $this->artisan('stackradar:report')->expectsOutput('Runtime inventory reported.')->assertSuccessful();
+        $this->artisan('stackradar:report')->assertSuccessful();
+        self::assertCount(2, $this->transport->payloads);
+        self::assertSame('cli', $this->transport->payloads[0]['context']->role);
+    }
+
+    public function test_the_manual_command_returns_a_failure_exit_code_when_unconfigured(): void
+    {
+        $this->configure('project_token', null);
+        $this->artisan('stackradar:report')->assertFailed();
+    }
+
+    public function test_ordinary_artisan_commands_do_not_report(): void
+    {
+        $this->artisan('list')->assertSuccessful();
+        self::assertSame([], $this->transport->payloads);
+    }
+}

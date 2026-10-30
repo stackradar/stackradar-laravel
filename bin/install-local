@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+php -r '
+$manifest = json_decode(file_get_contents("composer.json"), true, flags: JSON_THROW_ON_ERROR);
+$manifest["repositories"] = [["type" => "path", "url" => "../php-sdk", "options" => ["symlink" => true, "versions" => ["stackradar/php" => "0.1.0"]]]];
+file_put_contents("composer.local.json", json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES).PHP_EOL);
+'
+COMPOSER=composer.local.json composer update "$@"
