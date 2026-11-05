@@ -23,14 +23,13 @@ final class StackRadarServiceProvider extends ServiceProvider
         $this->mergeConfigFrom(__DIR__.'/../config/stackradar.php', 'stackradar');
 
         $this->app->singleton(Transport::class, fn ($app) => new HttpTransport(
-            endpoint: (string) $app['config']->get('stackradar.endpoint'),
-            projectToken: (string) $app['config']->get('stackradar.project_token'),
-            timeout: (float) $app['config']->get('stackradar.timeout'),
+            ingestKey: (string) $app['config']->get('stackradar.ingest_key'),
+            baseUrl: (string) $app['config']->get('stackradar.ingest_url'),
         ));
 
         $this->app->singleton(Client::class, fn ($app) => new Client(
-            environment: (string) $app['config']->get('stackradar.environment'),
             transport: $app->make(Transport::class),
+            timeout: (float) $app['config']->get('stackradar.timeout'),
         ));
 
         $this->app->singleton(Reporter::class, fn ($app) => new Reporter(

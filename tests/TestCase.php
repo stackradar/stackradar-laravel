@@ -27,12 +27,12 @@ abstract class TestCase extends Orchestra
     {
         $this->cachePath = sys_get_temp_dir().'/stackradar-laravel-test-'.bin2hex(random_bytes(8));
         $app['config']->set('cache.stores.file', ['driver' => 'file', 'path' => $this->cachePath]);
-        $app['config']->set('stackradar.project_token', 'test-project-token');
+        $app['config']->set('stackradar.ingest_key', 'test-project-token');
         $app['config']->set('stackradar.environment', 'PROD');
-        $app['config']->set('stackradar.endpoint', 'https://example.test/ingest');
-        $app['config']->set('stackradar.instance_id', 'instance-a');
+        $app['config']->set('stackradar.ingest_url', 'https://example.test');
+        $app['config']->set('stackradar.startup_delay', 0);
+        $app['config']->set('stackradar.startup_jitter', 0);
         $app['config']->set('stackradar.release', 'release-a');
-        $app['config']->set('stackradar.interval', 3600);
     }
 
     protected function setUp(): void

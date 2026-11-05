@@ -32,6 +32,7 @@ final class ConcurrencyTest extends TestCase
             }
 
             self::assertSame("report\n", file_get_contents($this->cachePath.'/reports'));
+            self::assertSame('', file_get_contents($this->cachePath.'/stderr'));
 
             // A fresh third process also sees the successful report's persisted due time.
             $third = proc_open([

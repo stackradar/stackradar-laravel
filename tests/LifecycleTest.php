@@ -27,7 +27,7 @@ final class LifecycleTest extends TestCase
 
         $kernel->terminate($request, $response);
         self::assertCount(1, $this->transport->payloads);
-        self::assertSame('web', $this->transport->payloads[0]['context']->role);
+        self::assertSame('php', $this->transport->payloads[0]['runtime']['name']);
 
         $second = Request::create('/healthy');
         $kernel->terminate($second, $kernel->handle($second));
@@ -47,7 +47,7 @@ final class LifecycleTest extends TestCase
         $this->app['events']->dispatch(new Looping('database', 'default'));
         $this->app['events']->dispatch(new Looping('database', 'default'));
         self::assertCount(1, $this->transport->payloads);
-        self::assertSame('queue', $this->transport->payloads[0]['context']->role);
+        self::assertSame('php', $this->transport->payloads[0]['runtime']['name']);
     }
 
     public function test_sync_jobs_do_not_create_queue_runtime_reports(): void
@@ -77,7 +77,7 @@ final class LifecycleTest extends TestCase
         }
 
         self::assertCount(1, $this->transport->payloads);
-        self::assertSame('web', $this->transport->payloads[0]['context']->role);
+        self::assertSame('php', $this->transport->payloads[0]['runtime']['name']);
     }
 
     public function test_the_manual_command_reports_cli_and_bypasses_the_due_gate(): void
@@ -85,12 +85,12 @@ final class LifecycleTest extends TestCase
         $this->artisan('stackradar:report')->expectsOutput('Runtime inventory reported.')->assertSuccessful();
         $this->artisan('stackradar:report')->assertSuccessful();
         self::assertCount(2, $this->transport->payloads);
-        self::assertSame('cli', $this->transport->payloads[0]['context']->role);
+        self::assertSame('cli', $this->transport->payloads[0]['runtime']['sapi']);
     }
 
     public function test_the_manual_command_returns_a_failure_exit_code_when_unconfigured(): void
     {
-        $this->configure('project_token', null);
+        $this->configure('ingest_key', null);
         $this->artisan('stackradar:report')->assertFailed();
     }
 

@@ -20,21 +20,21 @@ $app->instance('config', new Repository([
 ]));
 $app->instance('files', new Filesystem);
 $options = [
-    'enabled' => true, 'project_token' => 'test-token', 'environment' => 'PROD',
-    'endpoint' => 'https://example.test/ingest', 'interval' => 3600, 'retry_after' => 60,
-    'timeout' => 2, 'cache_store' => 'file', 'instance_id' => 'instance-a', 'release' => 'release-a',
+    'enabled' => true, 'ingest_key' => 'test-key', 'environment' => 'PROD',
+    'ingest_url' => 'https://example.test', 'startup_delay' => 0, 'startup_jitter' => 0,
+    'timeout' => 2, 'cache_store' => 'file', 'release' => 'release-a', 'service' => null, 'artifact' => null,
 ];
 $transport = new class($directory) implements Transport
 {
     public function __construct(private readonly string $directory) {}
 
-    public function send(array $payload): void
+    public function send(string $method, string $path, array $payload, float $timeout = 2.0): void
     {
         file_put_contents($this->directory.'/reports', "report\n", FILE_APPEND | LOCK_EX);
         usleep(200000);
     }
 };
-$reporter = new Reporter($options, new CacheManager($app), fn () => new Client('PROD', $transport), new NullLogger, $directory);
+$reporter = new Reporter($options, new CacheManager($app), fn () => new Client($transport), new NullLogger, $directory);
 
 // Synchronise both processes so they contend for the same real file-cache lease.
 file_put_contents($directory.'/ready-'.getmypid(), 'ready');

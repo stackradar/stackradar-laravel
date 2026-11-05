@@ -1,79 +1,69 @@
 # StackRadar for Laravel
 
-Automatic runtime dependency inventory for Laravel 12 and 13. This repository depends on the separate `stackradar/php` package. Requires PHP 8.2+ for Laravel 12; Laravel 13 has its own higher PHP requirement.
+Laravel 12/13 integration for Runtime Ingest Protocol v1, depending on the separate `stackradar/php` repository. Requires PHP 8.2+ for Laravel 12; Laravel 13 has its own higher requirement.
 
-This is an unpublished first version. The endpoint and JSON payload are provisional, with a replaceable transport so the ingestion API can evolve independently.
+## Server compatibility
 
-## Install and configure
+**PHP ingestion is not enabled by the landed v0 implementation.** As of v0 main `a69ddbb` (2026-11-05), its runtime allowlist excludes PHP, its inventory allowlist excludes Composer, and its snapshot processor hard-codes npm. These server changes are needed before this integration can ingest PHP successfully, in addition to the organization's `multi-source-projects` feature being enabled.
 
-After both packages are published:
+The SDK matches the landed field names, hashing, routes and response behavior. A generated report was checked against the actual server validator: only the two unsupported runtime/ecosystem fields fail. No server files, feature toggles or production data were changed. The packages remain unpublished.
 
-```bash
-composer require stackradar/laravel
-```
+## Configuration
+
+After publishing both packages, install `stackradar/laravel`. Laravel discovers its service provider automatically.
 
 ```dotenv
-STACKRADAR_PROJECT_TOKEN=your-project-token
+STACKRADAR_INGEST_KEY=sr_ingest_...
 STACKRADAR_ENVIRONMENT=PROD
-STACKRADAR_ENDPOINT=https://ingest.example.com/runtime
+STACKRADAR_SERVICE=api
+STACKRADAR_RELEASE=deploy-123
 ```
 
-The URL above is a placeholder. Set the full URL supplied by the ingestion API. The project token uses the `Authorization: Bearer` header. Laravel discovers the service provider automatically. No migrations, cron entry, inbound endpoint, queue connection, or daemon are required.
+Only the Ingest Key is required. Without it the package does nothing. The server derives the Project from that key. Environment and release are nullable; environment is never implicitly set to production. Service defaults to the root Composer package's name, or null if unnamed. `STACKRADAR_ARTIFACT` optionally identifies an image/build artifact.
 
-Optionally publish configuration:
+The endpoint origin defaults to `https://ingest.stackradar.com`. `STACKRADAR_INGEST_URL` is an internal testing override, not a full route URL. The previous prototype's `STACKRADAR_PROJECT_TOKEN` and `STACKRADAR_ENDPOINT` are no longer read.
 
 ```bash
 php artisan vendor:publish --tag=stackradar-config
 ```
 
-| Setting | Default | Purpose |
-| --- | --- | --- |
-| `enabled` | `true` | Disable with `STACKRADAR_ENABLED=false` |
-| `project_token` | unset | Required credential |
-| `environment` | `APP_ENV` / `production` | Environment label, preserved as supplied |
-| `endpoint` | unset | Required full ingestion URL |
-| `interval` | 3600 seconds | Interval after a successful report |
-| `retry_after` | 60 seconds | Initial failure delay, doubling to a maximum of one hour |
-| `timeout` | 2 seconds | Total HTTP request timeout, at most 10 seconds |
-| `cache_store` | `file` | Persistent Laravel cache store with atomic locks |
-| `instance_id` | Hash of the runtime hostname | Override with `STACKRADAR_INSTANCE_ID` |
-| `release` | unset | Set `STACKRADAR_RELEASE` to the deployment/image identifier |
+Published config exposes `enabled`, `ingest_key`, `environment`, `service`, `release`, `artifact`, `ingest_url`, `startup_delay` (5 seconds), `startup_jitter` (0–30 seconds), `timeout` (2 seconds total network budget), and `cache_store` (`file`). `STACKRADAR_ENABLED=false` disables reporting. Use `STACKRADAR_CACHE_STORE` to select another persistent Laravel cache store with atomic locks. The array cache is rejected.
 
-Missing credentials or endpoint means no automatic reporting. Invalid configuration and reporting failures produce a warning containing the exception class and HTTP status, without the exception message, token, URL, or payload.
+## Lifecycle and state
 
-## Reporting lifecycle
+HTTP reporting uses terminable middleware; queue reporting uses loop/completed/failed job events. Synchronous queue jobs and ordinary Artisan commands do not report automatically. The first lifecycle event persists an opaque UUID, its start timestamp and a randomized initial due time. No request sleeps to implement the delay. The first eligible event after it becomes due attempts the check-in.
 
-HTTP reports run in terminable middleware. Queue workers report from loop and completed/failed job events; synchronous queue jobs are excluded. Ordinary Artisan commands do not report automatically.
+State is local to the application replica, runtime role, PHP version/SAPI, key, endpoint and deployment configuration. Local hostname/application paths participate only in hashing cache keys and are never sent. Web, queue and CLI reporters get distinct persisted UUIDs. Multiple PHP-FPM processes on one replica/role share the reporter identity and lock; these identities do not count every OS process individually.
 
-Each eligible event checks persisted due state before collecting inventory. When due, it attempts a non-waiting lease, rechecks the state, records a retry reservation, then collects and sends. Success advances the due time. Failure keeps the retry reservation, with exponential backoff and support for `Retry-After` up to seven days. Cache failures skip the upload rather than sending without throttling. The `array` cache driver is rejected because it does not persist across PHP requests.
+The inventory is collected once and cached as plain package metadata, then reused across 10-minute check-ins. Installed Composer metadata file timestamp/size changes, a changed release/artifact, or a different scope invalidate the state. Set `STACKRADAR_RELEASE` or `STACKRADAR_ARTIFACT` for every deployment and restart long-lived workers; file timestamps alone cannot reliably identify every in-place installation change. Cache state expires after 30 days without a write. This is coordination metadata, not a queue of unsent reports.
 
-Unchanged inventories are still reported periodically to establish freshness. There is no local outbox and no inline HTTP retry. A process killed during an upload leaves a retry reservation; a later eligible event can try again. Duplicates remain possible, so API ingestion should be idempotent.
+Each due event takes a non-waiting lease, rechecks due state and reserves the next attempt before collecting or sending. It then POSTs the hash check-in and PUTs the complete list only after `409 unknown_inventory`. The two HTTP requests share the configured timeout. Unchanged inventories still generate check-ins; the server's 409 repairs a missing inventory.
 
-Reporting is scoped by token, environment, endpoint, application path, instance, release, runtime role, PHP version/SAPI, and Laravel version. Different instances, releases and web/queue/CLI roles do not suppress one another. State keys are hashed. Defaults aggregate processes on the same instance and role; this is not a census of every worker process.
+| Response | Behavior |
+| --- | --- |
+| 204 | Next check-in in 10 minutes |
+| 409 `unknown_inventory` | Upload the cached inventory |
+| 401 / 403 / 410 | Persist a stop decision for this reporter identity, including manual calls |
+| 413 / 422 on inventory upload | Suppress that unchanged inventory; later check-ins report collection failure without a list/hash |
+| 422 on check-in | Retry at the next interval; log a safe warning |
+| 429 | Persist `Retry-After`, or use the next interval |
+| Network / 5xx | Retry at the next interval; no disk outbox |
 
-The default file cache needs writable Laravel storage. Redis or another persistent lock-capable store can be selected through `STACKRADAR_CACHE_STORE`. Give every replica a distinct instance ID when using a shared cache or when hostnames are not unique. Set the release explicitly to report new deployments immediately, and restart long-lived workers on deployment. The default instance identifier is resolved at runtime, not baked into `config:cache`.
+Changing the key or deployment scope creates fresh state and clears an old stop/rejection decision. Clearing the selected cache also resets reporting identities and decisions. A locally oversized list is never truncated: check-ins continue with `inventory_too_large`. Temporary collection failures can be retried on later due events. Transport/cache/collection failures do not escape into requests/jobs; logging is guarded and excludes raw exception messages, keys and response bodies. Cache failures skip the upload rather than sending without throttling.
 
-**Timing is traffic-driven:** the first eligible request or worker event after an interval is due attempts a report. An idle web application has no wall-clock delivery guarantee. Termination still occupies the PHP worker; this is bounded HTTP work, not a detached background process. Queue loop reporting also uses worker time, outside job processing where possible. The configured HTTP timeout does not bound a customer's cache or logging service latency.
+Delivery is traffic-driven. Idle web applications cannot guarantee wall-clock heartbeats, and a stale observation does not prove the application stopped. Termination still consumes PHP worker capacity. The HTTP timeout does not bound a customer's cache/logging latency. This integration uses the normal HTTP kernel termination path under Octane; tests cover its application gateway, not native Swoole/RoadRunner/FrankenPHP servers or routes bypassing the kernel.
 
-The standard HTTP kernel termination path also runs under Octane. Tests cover the Octane application gateway across requests; native Swoole, RoadRunner, and FrankenPHP servers have not been exercised. Octane-specific routes that bypass Laravel's HTTP kernel are outside this version's automatic coverage.
-
-## Report now
+## Manual check-in
 
 ```bash
 php artisan stackradar:report
 ```
 
-This forces a report of the **CLI runtime**, bypassing the normal interval but respecting an active lease. It does not verify PHP-FPM or queue worker state. It exits unsuccessfully when disabled, unconfigured, locked, or unsuccessful. You may schedule this command yourself for CLI coverage.
+This forces the CLI reporter past its interval/startup delay, while respecting an active lease or stop decision. It reports CLI runtime state. The command exits unsuccessfully when disabled, unconfigured, locked, stopped, or unsuccessful.
 
-Reports contain PHP and extension versions, installed Composer packages (including deployed dev dependencies), environment, instance, release, runtime role, Laravel version, observation time, and SDK version. Installed metadata does not establish execution or reachability. See the PHP SDK README for the complete provisional schema.
+## Development
 
-## Replace the transport
-
-Bind `StackRadar\Transport` in your application's service provider to adapt to a different API contract or test without network calls. The binding is resolved lazily after the due check and lease. Custom transports must enforce their own timeouts.
-
-## Local development with the sibling repository
-
-Keep the separate Git repositories side by side:
+Keep the repositories side by side:
 
 ```text
 php-libs/
@@ -88,8 +78,6 @@ bin/install-local
 composer check
 ```
 
-`bin/install-local` generates an ignored `composer.local.json` and lockfile, with a path repository pointing to `../php-sdk`. Production Composer metadata contains no developer filesystem paths. Run the script again after changing either manifest; Composer does not import repositories from dependencies.
+The local installer generates ignored Composer metadata linking the sibling SDK; production Composer metadata contains no developer paths. Tests require PHP 8.3+ because they use PHPUnit 11. Testbench, fake transports, temporary file caches and separate PHP processes cover lifecycle, stable identity, caching, concurrent leases, startup jitter, stop decisions, retries and rejected inventories. Tests send no external API requests.
 
-Development tests require PHP 8.3+ because they use PHPUnit 11. Tests use Laravel Testbench, a fake transport and temporary file caches, with no external API calls. The integration suite covers requests, queue events, commands, Octane gateway termination, backoff and separate-process concurrency.
-
-Verified locally with Laravel 12.70.2 / PHP 8.3.31 and Laravel 13.39.0 / PHP 8.5.12. PHPStan also targets PHP 8.2 syntax; the PHP 8.2 runtime itself has not been exercised. No remote repository or release has been created. License metadata remains proprietary pending a distribution decision.
+See the PHP SDK README for the wire contract and its name/version-only limitation for moving development branches. No remote repository or package release has been created. License metadata remains proprietary pending a distribution decision.

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace StackRadar\Laravel\Tests;
 
+use Illuminate\Cache\Events\CacheHit;
 use Illuminate\Cache\FileStore;
 use Illuminate\Cache\Repository;
 use Illuminate\Contracts\Cache\Factory;
@@ -15,6 +16,7 @@ use RuntimeException;
 use StackRadar\Client;
 use StackRadar\Inventory;
 use StackRadar\Laravel\Reporter;
+use StackRadar\PackageInventory;
 use StackRadar\TransportException;
 
 final class ReporterTest extends TestCase
@@ -22,15 +24,30 @@ final class ReporterTest extends TestCase
     public function test_the_due_gate_survives_new_reporter_instances_and_does_not_collect_when_not_due(): void
     {
         $inventory = $this->createMock(Inventory::class);
-        $inventory->expects(self::exactly(2))->method('collect')->willReturn(['packages' => [], 'runtime' => []]);
-        $this->app->instance(Client::class, new Client('PROD', $this->transport, $inventory));
+        $inventory->expects(self::once())->method('collect')->willReturn(new PackageInventory('composer', []));
+        $this->app->instance(Client::class, new Client($this->transport, $inventory));
 
         self::assertTrue($this->reporter()->reportIfDue('web'));
         $this->app->forgetInstance(Reporter::class);
         self::assertFalse($this->reporter()->reportIfDue('web'));
-        Carbon::setTestNow(Carbon::now()->addHour());
+        Carbon::setTestNow(Carbon::now()->addMinutes(10));
         self::assertTrue($this->reporter()->reportIfDue('web'));
         self::assertCount(2, $this->transport->payloads);
+    }
+
+    public function test_ordinary_requests_do_not_read_the_large_inventory_cache_entry(): void
+    {
+        self::assertTrue($this->reporter()->reportIfDue('web'));
+        $hits = new \ArrayObject;
+        $this->app['events']->listen(CacheHit::class, function ($event) use ($hits): void {
+            $hits[] = $event->key;
+        });
+        $this->app->forgetInstance(Reporter::class);
+        self::assertFalse($this->reporter()->reportIfDue('web'));
+        self::assertNotEmpty($hits->getArrayCopy());
+        foreach ($hits as $key) {
+            self::assertStringEndsNotWith(':inventory', $key);
+        }
     }
 
     #[DataProvider('scopeChanges')]
@@ -45,9 +62,9 @@ final class ReporterTest extends TestCase
     public static function scopeChanges(): array
     {
         return [
-            ['release', 'release-b'], ['instance_id', 'instance-b'],
-            ['environment', 'STAGE'], ['project_token', 'other-token'],
-            ['endpoint', 'https://other.example.test/ingest'],
+            ['release', 'release-b'], ['service', 'worker'], ['artifact', 'image-b'],
+            ['environment', 'STAGE'], ['ingest_key', 'other-key'],
+            ['ingest_url', 'https://other.example.test'],
         ];
     }
 
@@ -57,32 +74,87 @@ final class ReporterTest extends TestCase
             self::assertTrue($this->reporter()->reportIfDue($role));
             self::assertFalse($this->reporter()->reportIfDue($role));
         }
-        self::assertSame(['web', 'queue', 'cli'], array_map(fn ($p) => $p['context']->role, $this->transport->payloads));
+        self::assertCount(3, array_unique(array_map(fn ($p) => $p['instance']['id'], $this->transport->payloads)));
     }
 
-    public function test_failures_back_off_and_success_resets_the_failure_counter(): void
+    public function test_transient_failures_retry_at_the_next_heartbeat_without_recollecting(): void
     {
+        $inventory = $this->createMock(Inventory::class);
+        $inventory->expects(self::once())->method('collect')->willReturn(new PackageInventory('composer', []));
+        $inventory->method('runtime')->willReturn(['name' => 'php', 'versions' => ['php' => PHP_VERSION]]);
+        $this->app->instance(Client::class, new Client($this->transport, $inventory));
         $this->transport->failure = new TransportException('Unavailable', 503);
         self::assertFalse($this->reporter()->reportIfDue('web'));
+        Carbon::setTestNow(Carbon::now()->addSeconds(599));
         self::assertFalse($this->reporter()->reportIfDue('web'));
         self::assertCount(1, $this->transport->payloads);
-
-        Carbon::setTestNow(Carbon::now()->addSeconds(60));
-        self::assertFalse($this->reporter()->reportIfDue('web'));
-        Carbon::setTestNow(Carbon::now()->addSeconds(60));
-        self::assertFalse($this->reporter()->reportIfDue('web'));
-        self::assertCount(2, $this->transport->payloads);
-
-        Carbon::setTestNow(Carbon::now()->addSeconds(60));
+        Carbon::setTestNow(Carbon::now()->addSecond());
         $this->transport->failure = null;
         self::assertTrue($this->reporter()->reportIfDue('web'));
-        Carbon::setTestNow(Carbon::now()->addHour());
-        $this->transport->failure = new TransportException('Unavailable', 503);
+        self::assertSame($this->transport->payloads[0]['instance'], $this->transport->payloads[1]['instance']);
+    }
+
+    #[DataProvider('stopStatuses')]
+    public function test_stop_responses_persist_across_requests_and_even_manual_reporting(int $status): void
+    {
+        $this->transport->failure = new TransportException('Stopped', $status);
         self::assertFalse($this->reporter()->reportIfDue('web'));
-        Carbon::setTestNow(Carbon::now()->addSeconds(60));
+        $this->app->forgetInstance(Reporter::class);
+        Carbon::setTestNow(Carbon::now()->addDay());
+        self::assertFalse($this->reporter()->reportIfDue('web', force: true));
+        self::assertCount(1, $this->transport->payloads);
+        $this->configure('ingest_key', 'replacement-key');
         $this->transport->failure = null;
         self::assertTrue($this->reporter()->reportIfDue('web'));
-        self::assertCount(5, $this->transport->payloads);
+    }
+
+    public static function stopStatuses(): array
+    {
+        return [[401], [403], [410]];
+    }
+
+    public function test_an_inventory_rejection_preserves_heartbeats_without_repeating_the_upload(): void
+    {
+        $this->transport->failures = [
+            new TransportException('Unknown', 409, reason: 'unknown_inventory'),
+            new TransportException('Rejected', 422, reason: 'inventory_hash_mismatch'),
+        ];
+        self::assertFalse($this->reporter()->reportIfDue('web'));
+        self::assertCount(2, $this->transport->calls);
+        Carbon::setTestNow(Carbon::now()->addMinutes(10));
+        self::assertTrue($this->reporter()->reportIfDue('web'));
+        self::assertCount(3, $this->transport->calls);
+        $body = $this->transport->calls[2]['payload'];
+        self::assertSame('failed', $body['packages']['status']);
+        self::assertArrayNotHasKey('inventory_hash', $body['packages']);
+        self::assertSame('POST', $this->transport->calls[2]['method']);
+    }
+
+    public function test_startup_jitter_is_persisted_without_sleeping_the_request(): void
+    {
+        $this->configure('startup_delay', 5);
+        $this->configure('startup_jitter', 30);
+        self::assertFalse($this->reporter()->reportIfDue('web'));
+        self::assertSame([], $this->transport->calls);
+        $this->app->forgetInstance(Reporter::class);
+        Carbon::setTestNow(Carbon::now()->addSeconds(4));
+        self::assertFalse($this->reporter()->reportIfDue('web'));
+        Carbon::setTestNow(Carbon::now()->addSeconds(31));
+        self::assertTrue($this->reporter()->reportIfDue('web'));
+    }
+
+    public function test_unset_environment_is_sent_as_null_and_instance_id_is_a_persisted_uuid(): void
+    {
+        $this->configure('environment', null);
+        self::assertTrue($this->reporter()->reportIfDue('web'));
+        $first = $this->transport->payloads[0];
+        self::assertNull($first['deployment']['environment']);
+        self::assertMatchesRegularExpression('/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/', $first['instance']['id']);
+        self::assertArrayNotHasKey('hostname', $first);
+        Carbon::setTestNow(Carbon::now()->addMinutes(10));
+        $this->app->forgetInstance(Reporter::class);
+        self::assertTrue($this->reporter()->reportIfDue('web'));
+        self::assertSame($first['instance'], $this->transport->payloads[1]['instance']);
     }
 
     public function test_server_retry_after_is_respected(): void
@@ -124,7 +196,21 @@ final class ReporterTest extends TestCase
 
     public static function disabledConfigurations(): array
     {
-        return [['enabled', false], ['project_token', null], ['environment', null], ['endpoint', null]];
+        return [['enabled', false], ['ingest_key', null]];
+    }
+
+    public function test_an_oversized_inventory_is_not_truncated_or_recollected_but_heartbeats_continue(): void
+    {
+        $inventory = $this->createMock(Inventory::class);
+        $inventory->expects(self::once())->method('collect')->willThrowException(new \LengthException('Too large'));
+        $inventory->method('runtime')->willReturn(['name' => 'php', 'versions' => ['php' => PHP_VERSION]]);
+        $this->app->instance(Client::class, new Client($this->transport, $inventory));
+        self::assertTrue($this->reporter()->reportIfDue('web'));
+        Carbon::setTestNow(Carbon::now()->addMinutes(10));
+        self::assertTrue($this->reporter()->reportIfDue('web'));
+        self::assertSame('failed', $this->transport->payloads[0]['packages']['status']);
+        self::assertSame([['code' => 'inventory_too_large']], $this->transport->payloads[0]['packages']['errors']);
+        self::assertCount(2, $this->transport->calls);
     }
 
     public function test_an_ephemeral_cache_is_rejected(): void
@@ -164,13 +250,15 @@ final class ReporterTest extends TestCase
     {
         $inventory = $this->createMock(Inventory::class);
         $inventory->method('collect')->willThrowException(new RuntimeException('Collection failed'));
-        $this->app->instance(Client::class, new Client('PROD', $this->transport, $inventory));
+        $this->app->instance(Client::class, new Client($this->transport, $inventory));
         $logger = $this->createMock(LoggerInterface::class);
         $logger->method('warning')->willThrowException(new RuntimeException('Logger failed'));
         $this->app->instance(LoggerInterface::class, $logger);
+        $this->transport->failure = new TransportException('Network failure');
 
         self::assertFalse($this->reporter()->reportIfDue('web'));
         self::assertFalse($this->reporter()->reportIfDue('web'));
-        self::assertSame([], $this->transport->payloads);
+        self::assertSame('failed', $this->transport->payloads[0]['packages']['status']);
+        self::assertCount(1, $this->transport->payloads);
     }
 }
