@@ -6,43 +6,40 @@ Supports Laravel 12+. Requires PHP 8.2+ and the PHP version required by your Lar
 
 ## Install with your agent
 
-Open your application repository in your coding agent and paste this prompt.
-The agent will confirm which deployed environments to configure, such as QA,
-test, staging or production. Local development is opt-in.
-Keep your Ingest Key in your deployment's secret store, outside the prompt.
+Paste this prompt into your coding agent from your application repository:
 
 ```text
-Set up StackRadar runtime reporting for this Laravel app in the deployed
-environments I choose, such as QA, test, staging or production. Include local
-development only if I explicitly request it.
-Read https://github.com/stackradar/stackradar-laravel for the current
-installation and configuration reference, then make the changes in this app.
+Set up stackradar/laravel runtime reporting for this app.
 
-1. Inspect the app's instructions, PHP/Laravel versions, deployment config
-   and secrets workflow. Confirm which deployed environments to configure and
-   the destination StackRadar organization and Project; ask for missing details.
-2. Install stackradar/laravel in Composer require (not require-dev) and update
-   the lockfile so it is installed in deployed builds. Laravel discovers it
-   automatically.
-3. Configure STACKRADAR_INGEST_KEY through the deployment's existing secret
-   management workflow. Have me enter the value directly there when needed.
-   Keep the value out of chat, tool output, command arguments and committed
-   files. Do not retrieve or copy it into a local .env for this setup.
-4. Give each selected deployment a distinct environment name, check the
-   service name, set STACKRADAR_RELEASE from its release identifier, and
-   select an existing persistent cache store with atomic locks. Use config
-   supported by this app and host; ephemeral or read-only filesystems need
-   a suitable shared store.
-5. Run relevant checks and follow this repository's release process. Prepare
-   reviewable changes before requesting any required deployment approval.
-   Ensure web processes and long-lived queue workers pick up the new config.
-6. For each selected environment, verify a fresh report in the intended
-   StackRadar Project from the deployed app, with the correct environment,
-   service, release and installed packages.
-   Check automatic web and queue reporting through normal activity where
-   applicable. A local or CLI-only report does not prove deployed web and
-   queue reporting. If access or approval blocks verification, state exactly
-   what remains; distinguish installed, deployed and verified in your summary.
+1. Target: inspect the app's instructions and deployment configuration.
+   Before editing, confirm which deployed environments to report (for example,
+   QA, test, staging or production) and their destination StackRadar organization
+   and Project. Resolve missing details with me. Include local development only
+   when I explicitly request it.
+
+2. Configure: read the installation, configuration and connection-check reference
+   at https://github.com/stackradar/stackradar-laravel#manual-installation.
+   Check compatibility, then prepare the Composer dependency and lockfile changes
+   so deployed builds include the SDK. For every selected environment, configure
+   its environment name, service, release identifier and persistent cache with
+   atomic locks through the app's existing deployment workflow.
+
+   Keep ingest keys within the deployment's secret-management workflow. Reuse an
+   existing secret reference or have me enter STACKRADAR_INGEST_KEY directly into
+   the secret store. Keep values out of chat, tool output, command arguments,
+   committed files and local development configuration.
+
+3. Release: run the relevant project checks and resolve failures caused by these
+   changes. Present reviewable changes for any required release approval, then
+   follow the authorized deployment process. Ensure deployed web processes and
+   long-lived queue workers load the SDK and configuration.
+
+4. Verify: for every selected environment, confirm fresh reports in the intended
+   StackRadar Project with the expected environment, service, release and
+   installed packages. Verify web and queue reporting through deployed activity
+   where applicable; the CLI connection check verifies only the CLI runtime.
+   Report each environment as configured, deployed or verified, backed by the
+   evidence obtained. If a step is blocked, name the remaining action and owner.
 ```
 
 ## Manual installation
