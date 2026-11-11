@@ -82,4 +82,4 @@ composer check
 
 The local installer generates ignored Composer metadata linking the sibling SDK; production Composer metadata contains no developer paths. Tests require PHP 8.3+ because they use PHPUnit 11. Testbench, fake transports, temporary file caches and separate PHP processes cover lifecycle, stable identity, caching, concurrent leases, startup jitter, stop decisions, retries and rejected inventories. Tests send no external API requests.
 
-See the PHP SDK README for the wire contract and its name/version-only limitation for moving development branches. No remote repository or package release has been created. License metadata remains proprietary pending a distribution decision.
+See the PHP SDK README for the wire contract and its name/version-only limitation for moving development branches. The repository is private and no package release has been published. License metadata remains proprietary pending a distribution decision.
