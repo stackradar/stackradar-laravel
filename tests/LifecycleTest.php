@@ -13,6 +13,8 @@ use Illuminate\Support\Facades\Route;
 use Laravel\Octane\ApplicationGateway;
 use Laravel\Octane\OctaneServiceProvider;
 use RuntimeException;
+use StackRadar\Laravel\Reporter;
+use StackRadar\TransportException;
 
 final class LifecycleTest extends TestCase
 {
@@ -92,6 +94,28 @@ final class LifecycleTest extends TestCase
     {
         $this->configure('ingest_key', null);
         $this->artisan('stackradar:report')->assertFailed();
+    }
+
+    public function test_the_manual_command_prints_the_persisted_stop_reason_without_debug(): void
+    {
+        $this->transport->failure = new TransportException('Invalid key', 401, reason: 'invalid_ingest_key');
+        $this->artisan('stackradar:report')->expectsOutput('Report not sent: HTTP 401 invalid_ingest_key')->assertFailed();
+        $this->app->forgetInstance(Reporter::class);
+        $this->artisan('stackradar:report')->expectsOutput('Report not sent: HTTP 401 invalid_ingest_key')->assertFailed();
+        self::assertCount(1, $this->transport->calls);
+    }
+
+    public function test_an_accepted_heartbeat_does_not_claim_a_rejected_inventory_was_reported(): void
+    {
+        $this->transport->failures = [
+            new TransportException('Unknown', 409, reason: 'unknown_inventory'),
+            new TransportException('Rejected', 422, reason: 'inventory_hash_mismatch'),
+        ];
+        $this->artisan('stackradar:report')->assertFailed();
+        $this->artisan('stackradar:report')
+            ->expectsOutput('Check-in accepted; inventory unavailable: HTTP 422 inventory_hash_mismatch')
+            ->assertFailed();
+        self::assertCount(3, $this->transport->calls);
     }
 
     public function test_ordinary_artisan_commands_do_not_report(): void

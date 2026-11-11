@@ -14,7 +14,7 @@ use Illuminate\Support\Carbon;
 use LengthException;
 use LogicException;
 use Psr\Log\LoggerInterface;
-use SensitiveParameter;
+use SensitiveParameterValue;
 use StackRadar\Client;
 use StackRadar\PackageInventory;
 use StackRadar\TransportException;
@@ -29,22 +29,54 @@ final class Reporter
     /** @var array<string, int> */
     private array $localNextAttempt = [];
 
-    /**
-     * @param  array<string, mixed>  $options
-     * @param  Closure(): Client  $client
-     */
+    /** @var array<string, mixed> */
+    private array $options;
+
+    private readonly SensitiveParameterValue $services;
+
+    private string $applicationPath;
+
+    private bool $hasKey;
+
+    private string $keyFingerprint;
+
+    /** @var array{status: int|null, reason: string}|null */
+    private ?array $lastFailure = null;
+
+    /** @param array<string, mixed> $options */
     public function __construct(
-        #[SensitiveParameter] private readonly array $options,
-        private readonly Factory $cache,
-        private readonly Closure $client,
-        private readonly LoggerInterface $logger,
-        private readonly string $applicationPath,
-    ) {}
+        #[\SensitiveParameter]
+        array $options,
+        Factory $cache,
+        Closure $client,
+        LoggerInterface $logger,
+        string $applicationPath
+    ) {
+        $key = (string) ($options['ingest_key'] ?? '');
+        $this->hasKey = trim($key) !== '';
+        $this->keyFingerprint = hash('sha256', $key);
+        unset($options['ingest_key']);
+        $this->options = $options;
+        $this->applicationPath = $applicationPath;
+        $this->services = new SensitiveParameterValue(compact('cache', 'client', 'logger'));
+    }
+
+    /** @return array{status: int|null, reason: string}|null */
+    public function lastFailure(): ?array
+    {
+        return $this->lastFailure;
+    }
+
+    /** @return array{cache: Factory, client: Closure(): Client, logger: LoggerInterface} */
+    private function services(): array
+    {
+        return $this->services->getValue();
+    }
 
     /** @return array<string, mixed> */
     public function __debugInfo(): array
     {
-        return ['options' => array_replace($this->options, ['ingest_key' => '[redacted]'])];
+        return ['options' => $this->options, 'ingest_key' => $this->hasKey ? '[redacted]' : null];
     }
 
     public function reportIfDue(string $role, bool $force = false): bool
@@ -53,24 +85,17 @@ final class Reporter
         if (! $force && ($this->localNextAttempt[$role] ?? 0) > $now) {
             return false;
         }
+        $this->lastFailure = null;
         $this->localNextAttempt[$role] = $now + self::HEARTBEAT_INTERVAL;
         try {
             return $this->report($role, $force);
         } catch (Throwable $exception) {
+            $this->lastFailure = $this->failure($exception);
             if ($this->localNextAttempt[$role] <= Carbon::now()->getTimestamp()) {
                 $this->localNextAttempt[$role] = Carbon::now()->getTimestamp() + self::HEARTBEAT_INTERVAL;
             }
-            try {
-                if ($this->options['debug'] ?? false) {
-                    $this->logger->warning('StackRadar runtime report failed.', [
-                        'exception_type' => $exception::class,
-                        'status' => $exception instanceof TransportException ? $exception->getCode() : null,
-                        'reason' => $exception instanceof TransportException
-                            && preg_match('/\A[a-z0-9_]{1,100}\z/', $exception->reason ?? '') === 1 ? $exception->reason : null,
-                    ]);
-                }
-            } catch (Throwable) {
-                // Application telemetry must also tolerate a broken logger.
+            if (($this->options['debug'] ?? false) && ! $this->isTerminal($exception)) {
+                $this->warn([...$this->lastFailure, 'exception_type' => get_class($exception)]);
             }
 
             return false;
@@ -80,7 +105,9 @@ final class Reporter
     private function report(string $role, bool $force): bool
     {
         $options = $this->options;
-        if (! $options['enabled'] || empty($options['ingest_key'])) {
+        if (! $options['enabled'] || ! $this->hasKey) {
+            $this->lastFailure = ['status' => null, 'reason' => ! $options['enabled'] ? 'sdk_disabled' : 'not_configured'];
+
             return false;
         }
         if ((int) $options['startup_delay'] < 0 || (int) $options['startup_jitter'] < 0) {
@@ -88,24 +115,33 @@ final class Reporter
         }
 
         $root = InstalledVersions::getRootPackage();
-        $client = ($this->client)();
+        $client = ($this->services()['client'])();
         $key = 'stackradar:'.hash('sha256', json_encode([
-            $options['ingest_key'], $options['ingest_url'], $options['environment'], $options['service'],
+            $this->keyFingerprint, $options['ingest_url'], $options['environment'], $options['service'],
             $options['release'], $options['artifact'],
             $this->applicationPath, gethostname(), PHP_VERSION, PHP_SAPI, $role,
             $client->inventoryFingerprint(),
         ], JSON_THROW_ON_ERROR));
-        $cache = $this->cache->store($options['cache_store']);
+        $cache = $this->services()['cache']->store($options['cache_store']);
         if (! $cache instanceof Repository || $cache->getStore() instanceof ArrayStore || ! $cache->getStore() instanceof LockProvider) {
             throw new LogicException('StackRadar needs a persistent cache store supporting atomic locks.');
         }
         $state = $cache->get($key, []);
         $this->localNextAttempt[$role] = $state['next_attempt_at'] ?? $this->localNextAttempt[$role];
-        if (($state['stopped'] ?? false) || (! $force && ($state['next_attempt_at'] ?? 0) > Carbon::now()->getTimestamp())) {
+        if ($state['stopped'] ?? false) {
+            $this->lastFailure = $state['failure'] ?? ['status' => null, 'reason' => 'reporting_stopped'];
+            $this->pause($role);
+
+            return false;
+        }
+        if (! $force && ($state['next_attempt_at'] ?? 0) > Carbon::now()->getTimestamp()) {
             return false;
         }
         $lease = $cache->getStore()->lock($key.':lock', max(15, (int) ceil((float) $options['timeout']) + 5));
         if (! $lease->get()) {
+            $this->lastFailure = ['status' => null, 'reason' => 'report_in_progress'];
+            $this->pause($role);
+
             return false;
         }
 
@@ -120,7 +156,13 @@ final class Reporter
                 $this->save($cache, $key, $state);
             }
             $this->localNextAttempt[$role] = $state['next_attempt_at'];
-            if (($state['stopped'] ?? false) || (! $force && $state['next_attempt_at'] > $now)) {
+            if ($state['stopped'] ?? false) {
+                $this->lastFailure = $state['failure'] ?? ['status' => null, 'reason' => 'reporting_stopped'];
+                $this->pause($role);
+
+                return false;
+            }
+            if (! $force && $state['next_attempt_at'] > $now) {
                 return false;
             }
             $state['next_attempt_at'] = $now + self::HEARTBEAT_INTERVAL;
@@ -168,8 +210,20 @@ final class Reporter
                     $state['inventory_error'] = $exception->reason ?? 'inventory_rejected';
                 }
                 $this->localNextAttempt[$role] = $state['next_attempt_at'];
-                $this->save($cache, $key, $state);
+                if ($this->isTerminal($exception)) {
+                    $state['failure'] = $this->failure($exception);
+                    $state = $this->warnOnce($cache, $key, $state, $state['failure']);
+                } else {
+                    $this->save($cache, $key, $state);
+                }
                 throw $exception;
+            }
+            if ($inventory === null) {
+                $this->lastFailure = $state['failure'] ?? ['status' => null, 'reason' => $state['inventory_error'] ?? 'collection_failed'];
+                if ($state['inventory_blocked'] ?? false) {
+                    $state['failure'] = $this->lastFailure;
+                    $state = $this->warnOnce($cache, $key, $state, $this->lastFailure);
+                }
             }
             $state['last_success_at'] = Carbon::now()->getTimestamp();
             $this->save($cache, $key, $state);
@@ -185,6 +239,58 @@ final class Reporter
     {
         if (! $cache->put($key, $state, 2592000)) {
             throw new LogicException('Unable to persist StackRadar reporting state.');
+        }
+    }
+
+    private function pause(string $role): void
+    {
+        $this->localNextAttempt[$role] = max($this->localNextAttempt[$role] ?? 0, Carbon::now()->getTimestamp() + self::HEARTBEAT_INTERVAL);
+    }
+
+    private function isTerminal(Throwable $exception): bool
+    {
+        return $exception instanceof TransportException && (
+            ($exception->getCode() === 401 && $exception->reason === 'invalid_ingest_key') || $exception->getCode() === 410
+            || ($exception->inventoryUpload && in_array($exception->getCode(), [413, 422], true))
+        );
+    }
+
+    /** @return array{status: int|null, reason: string} */
+    private function failure(Throwable $exception): array
+    {
+        return [
+            'status' => $exception instanceof TransportException ? $exception->getCode() : null,
+            'reason' => $exception instanceof TransportException && preg_match('/\A[a-z0-9_]{1,100}\z/', $exception->reason ?? '') === 1
+                ? $exception->reason : 'report_failed',
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $state
+     * @param  array{status: int|null, reason: string}  $failure
+     * @return array<string, mixed>
+     */
+    private function warnOnce(Repository $cache, string $key, array $state, array $failure): array
+    {
+        $warning = (string) $failure['status'].'|'.$failure['reason'];
+        if (! isset($state['warnings'][$warning])) {
+            $state['warnings'][$warning] = true;
+            $this->save($cache, $key, $state);
+            $this->warn($failure);
+        } else {
+            $this->save($cache, $key, $state);
+        }
+
+        return $state;
+    }
+
+    /** @param array{status: int|null, reason: string, exception_type?: string} $failure */
+    private function warn(array $failure): void
+    {
+        try {
+            $this->services()['logger']->warning('StackRadar runtime report failed.', $failure);
+        } catch (Throwable $ignored) {
+            // Logging must not turn telemetry into an application error.
         }
     }
 

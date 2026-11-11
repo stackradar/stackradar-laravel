@@ -14,8 +14,12 @@ final class ReportCommand extends Command
 
     public function handle(Reporter $reporter): int
     {
-        if (! $reporter->reportIfDue('cli', force: true)) {
-            $this->error('Report not sent. Check StackRadar configuration or enable STACKRADAR_DEBUG for diagnostics.');
+        $accepted = $reporter->reportIfDue('cli', force: true);
+        $failure = $reporter->lastFailure();
+        if (! $accepted || $failure !== null) {
+            $reason = $failure['reason'] ?? 'report_not_sent';
+            $status = ($failure['status'] ?? 0) > 0 ? 'HTTP '.$failure['status'].' ' : '';
+            $this->error(($accepted ? 'Check-in accepted; inventory unavailable: ' : 'Report not sent: ').$status.$reason);
 
             return self::FAILURE;
         }

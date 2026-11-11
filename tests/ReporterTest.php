@@ -15,10 +15,13 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use Psr\Log\LoggerInterface;
 use RuntimeException;
 use StackRadar\Client;
+use StackRadar\HttpTransport;
 use StackRadar\Inventory;
 use StackRadar\Laravel\Reporter;
 use StackRadar\PackageInventory;
 use StackRadar\TransportException;
+use Symfony\Component\VarDumper\Cloner\VarCloner;
+use Symfony\Component\VarDumper\Dumper\CliDumper;
 
 final class ReporterTest extends TestCase
 {
@@ -237,6 +240,99 @@ final class ReporterTest extends TestCase
         $dump = ob_get_clean();
         self::assertStringNotContainsString('test-project-token', $dump);
         self::assertStringContainsString('[redacted]', $dump);
+    }
+
+    public function test_actual_dump_mechanisms_cannot_reveal_sdk_credentials(): void
+    {
+        $this->configure('ingest_key', 'sr_ingest_SECRET123');
+        $objects = [$this->reporter(), new HttpTransport('sr_ingest_SECRET123')];
+        $cloner = new VarCloner;
+        $cloner->setMaxItems(100000);
+        $cloner->setMaxString(100000);
+        $dumper = new CliDumper;
+        foreach ($objects as $object) {
+            $dump = $dumper->dump($cloner->cloneVar($object), true);
+            self::assertStringNotContainsString('sr_ingest_SECRET123', $dump);
+            self::assertStringNotContainsString('sr_ingest_SECRET123', var_export($object, true));
+            self::assertStringNotContainsString('sr_ingest_SECRET123', print_r($object, true));
+            try {
+                serialize($object);
+                self::fail('Secret-bearing SDK objects must not serialize.');
+            } catch (\Exception $exception) {
+                self::assertStringNotContainsString('sr_ingest_SECRET123', $exception->getMessage());
+            }
+        }
+    }
+
+    public function test_a_terminal_stop_warns_once_by_default_and_rearms_the_local_pause(): void
+    {
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::once())->method('warning')->with('StackRadar runtime report failed.', [
+            'status' => 401, 'reason' => 'invalid_ingest_key',
+        ]);
+        $this->app->instance(LoggerInterface::class, $logger);
+        $this->transport->failure = new TransportException('Invalid key', 401, reason: 'invalid_ingest_key');
+        self::assertFalse($this->reporter()->reportIfDue('queue'));
+        Carbon::setTestNow(Carbon::now()->addMinutes(11));
+        $this->app->forgetInstance(Reporter::class);
+        $reads = new \ArrayObject;
+        $this->app['events']->listen(CacheHit::class, function ($event) use ($reads): void {
+            $reads[] = $event->key;
+        });
+        $reporter = $this->reporter();
+        for ($i = 0; $i < 5; $i++) {
+            self::assertFalse($reporter->reportIfDue('queue'));
+        }
+        self::assertCount(1, $reads);
+        self::assertSame('invalid_ingest_key', $reporter->lastFailure()['reason']);
+        Carbon::setTestNow(Carbon::now()->addMinutes(10));
+        self::assertFalse($reporter->reportIfDue('queue'));
+        self::assertCount(2, $reads);
+        self::assertCount(1, $this->transport->calls);
+    }
+
+    public function test_a_rejected_inventory_warns_only_once_even_as_heartbeats_continue(): void
+    {
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::once())->method('warning');
+        $this->app->instance(LoggerInterface::class, $logger);
+        $this->transport->failures = [
+            new TransportException('Unknown', 409, reason: 'unknown_inventory'),
+            new TransportException('Rejected', 422, reason: 'inventory_hash_mismatch'),
+        ];
+        self::assertFalse($this->reporter()->reportIfDue('web'));
+        $this->app->forgetInstance(Reporter::class);
+        Carbon::setTestNow(Carbon::now()->addMinutes(10));
+        self::assertTrue($this->reporter()->reportIfDue('web'));
+        self::assertSame('inventory_hash_mismatch', $this->reporter()->lastFailure()['reason']);
+        Carbon::setTestNow(Carbon::now()->addMinutes(10));
+        self::assertTrue($this->reporter()->reportIfDue('web'));
+    }
+
+    public function test_a_held_lease_rearms_the_local_pause_even_when_the_saved_attempt_is_past(): void
+    {
+        self::assertTrue($this->reporter()->reportIfDue('queue'));
+        $reads = new \ArrayObject;
+        $this->app['events']->listen(CacheHit::class, function ($event) use ($reads): void {
+            $reads[] = $event->key;
+        });
+        $this->app->forgetInstance(Reporter::class);
+        self::assertFalse($this->reporter()->reportIfDue('queue'));
+        $key = $reads[0];
+        Carbon::setTestNow(Carbon::now()->addMinutes(11));
+        $lock = $this->app->make(Factory::class)->store('file')->getStore()->lock($key.':lock', 15);
+        self::assertTrue($lock->get());
+        $this->app->forgetInstance(Reporter::class);
+        $reads->exchangeArray([]);
+        try {
+            $reporter = $this->reporter();
+            for ($i = 0; $i < 5; $i++) {
+                self::assertFalse($reporter->reportIfDue('queue'));
+            }
+            self::assertCount(1, $reads);
+        } finally {
+            $lock->release();
+        }
     }
 
     public function test_an_inventory_rejection_preserves_heartbeats_without_repeating_the_upload(): void
