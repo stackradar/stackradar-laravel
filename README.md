@@ -9,37 +9,17 @@ Supports Laravel 12+. Requires PHP 8.2+ and the PHP version required by your Lar
 Paste this prompt into your coding agent from your application repository:
 
 ```text
-Set up stackradar/laravel runtime reporting for this app.
+Install StackRadar runtime reporting in this Laravel app:
+https://github.com/stackradar/stackradar-laravel
 
-1. Target: inspect the app's instructions and deployment configuration.
-   Before editing, confirm which deployed environments to report (for example,
-   QA, test, staging or production) and their destination StackRadar organization
-   and Project. Resolve missing details with me. Include local development only
-   when I explicitly request it.
+Ask which deployed environments and StackRadar Project to use.
+Follow this app's deployment and secrets workflow, keeping ingest
+keys out of chat and tool output. Have me enter secrets directly
+where needed.
 
-2. Configure: read the installation, configuration and connection-check reference
-   at https://github.com/stackradar/stackradar-laravel#manual-installation.
-   Check compatibility, then prepare the Composer dependency and lockfile changes
-   so deployed builds include the SDK. For every selected environment, configure
-   its environment name, service, release identifier and persistent cache with
-   atomic locks through the app's existing deployment workflow.
-
-   Keep ingest keys within the deployment's secret-management workflow. Reuse an
-   existing secret reference or have me enter STACKRADAR_INGEST_KEY directly into
-   the secret store. Keep values out of chat, tool output, command arguments,
-   committed files and local development configuration.
-
-3. Release: run the relevant project checks and resolve failures caused by these
-   changes. Present reviewable changes for any required release approval, then
-   follow the authorized deployment process. Ensure deployed web processes and
-   long-lived queue workers load the SDK and configuration.
-
-4. Verify: for every selected environment, confirm fresh reports in the intended
-   StackRadar Project with the expected environment, service, release and
-   installed packages. Verify web and queue reporting through deployed activity
-   where applicable; the CLI connection check verifies only the CLI runtime.
-   Report each environment as configured, deployed or verified, backed by the
-   evidence obtained. If a step is blocked, name the remaining action and owner.
+Make the changes, run relevant checks, and verify reporting from
+each selected environment. State anything still awaiting deployment
+or verification.
 ```
 
 ## Manual installation
