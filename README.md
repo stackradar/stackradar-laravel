@@ -4,7 +4,25 @@ See which Composer packages are deployed in each environment. The package report
 
 Supports Laravel 12+. Requires PHP 8.2+ and the PHP version required by your Laravel release.
 
-## Install
+## Install with your agent
+
+Paste this prompt into your coding agent from your application repository:
+
+```text
+Install StackRadar runtime reporting in this Laravel app:
+https://github.com/stackradar/stackradar-laravel
+
+Ask which deployed environments and StackRadar Project to use.
+Follow this app's deployment and secrets workflow, keeping ingest
+keys out of chat and tool output. Have me enter secrets directly
+where needed.
+
+Make the changes, run relevant checks, and verify reporting from
+each selected environment. State anything still awaiting deployment
+or verification.
+```
+
+## Manual installation
 
 ```bash
 composer require stackradar/laravel
