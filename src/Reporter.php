@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace StackRadar\Laravel;
 
 use Closure;
-use Composer\InstalledVersions;
 use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\Repository;
 use Illuminate\Contracts\Cache\Factory;
@@ -114,7 +113,6 @@ final class Reporter
             throw new LogicException('StackRadar reporting intervals are invalid.');
         }
 
-        $root = InstalledVersions::getRootPackage();
         $client = ($this->services()['client'])();
         $key = 'stackradar:'.hash('sha256', json_encode([
             $this->keyFingerprint, $options['ingest_url'], $options['environment'], $options['service'],
@@ -192,7 +190,7 @@ final class Reporter
                     'instance' => $state['instance'],
                     'deployment' => [
                         'environment' => $options['environment'],
-                        'service' => $options['service'] ?? ($root['name'] === '__root__' ? null : $root['name']),
+                        'service' => $options['service'],
                         'release' => is_string($options['release']) && trim($options['release']) !== ''
                             ? ['value' => $options['release'], 'source' => 'config:stackradar.release'] : null,
                         'artifact' => $options['artifact'],

@@ -2,7 +2,7 @@
     "name": "stackradar/laravel",
     "description": "Laravel integration for StackRadar runtime dependency inventory.",
     "type": "library",
-    "license": "proprietary",
+    "license": "Apache-2.0",
     "require": {
         "php": "^8.2",
         "illuminate/cache": "^12.0 || ^13.0",

@@ -11,6 +11,7 @@ use Illuminate\Queue\Events\JobExceptionOccurred;
 use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\Looping;
 use Illuminate\Support\ServiceProvider;
+use Illuminate\Support\Str;
 use Psr\Log\LoggerInterface;
 use StackRadar\Client;
 use StackRadar\HttpTransport;
@@ -32,13 +33,20 @@ final class StackRadarServiceProvider extends ServiceProvider
             timeout: (float) $app['config']->get('stackradar.timeout'),
         ));
 
-        $this->app->singleton(Reporter::class, fn ($app) => new Reporter(
-            options: $app['config']->get('stackradar'),
-            cache: $app->make(Factory::class),
-            client: fn (): Client => $app->make(Client::class),
-            logger: $app->make(LoggerInterface::class),
-            applicationPath: $app->basePath(),
-        ));
+        $this->app->singleton(Reporter::class, function ($app): Reporter {
+            $options = $app['config']->get('stackradar');
+            $options['enabled'] = $options['enabled'] && ! $app->runningUnitTests();
+            $options['environment'] ??= $app['config']->get('app.env');
+            $options['service'] ??= rtrim(Str::substr(Str::slug((string) $app['config']->get('app.name')), 0, 255), '-') ?: null;
+
+            return new Reporter(
+                options: $options,
+                cache: $app->make(Factory::class),
+                client: fn (): Client => $app->make(Client::class),
+                logger: $app->make(LoggerInterface::class),
+                applicationPath: $app->basePath(),
+            );
+        });
     }
 
     public function boot(): void

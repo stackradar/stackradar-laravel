@@ -365,18 +365,61 @@ final class ReporterTest extends TestCase
         self::assertTrue($this->reporter()->reportIfDue('web'));
     }
 
-    public function test_unset_environment_is_sent_as_null_and_instance_id_is_a_persisted_uuid(): void
+    public function test_environment_defaults_to_laravel_and_instance_id_is_a_persisted_uuid(): void
     {
+        $this->app['config']->set('app.env', 'staging');
         $this->configure('environment', null);
         self::assertTrue($this->reporter()->reportIfDue('web'));
         $first = $this->transport->payloads[0];
-        self::assertNull($first['deployment']['environment']);
+        self::assertSame('staging', $first['deployment']['environment']);
         self::assertMatchesRegularExpression('/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/', $first['instance']['id']);
         self::assertArrayNotHasKey('hostname', $first);
         Carbon::setTestNow(Carbon::now()->addMinutes(10));
         $this->app->forgetInstance(Reporter::class);
         self::assertTrue($this->reporter()->reportIfDue('web'));
         self::assertSame($first['instance'], $this->transport->payloads[1]['instance']);
+    }
+
+    #[DataProvider('applicationNames')]
+    public function test_service_defaults_to_a_normalized_application_name(string $name, ?string $expected): void
+    {
+        $this->app['config']->set('app.name', $name);
+        $this->configure('service', null);
+        self::assertTrue($this->reporter()->reportIfDue('web'));
+        self::assertSame($expected, $this->transport->payloads[0]['deployment']['service']);
+    }
+
+    public static function applicationNames(): array
+    {
+        return [
+            ['My Customer API', 'my-customer-api'],
+            ['  Café & Queue_Workers  ', 'cafe-queue-workers'],
+            ['!!!', null],
+            ['', null],
+            [str_repeat('a', 254).' b', str_repeat('a', 254)],
+        ];
+    }
+
+    public function test_explicit_environment_and_service_override_laravel_defaults(): void
+    {
+        $this->app['config']->set('app.env', 'local');
+        $this->app['config']->set('app.name', 'My App');
+        $this->configure('environment', 'production');
+        $this->configure('service', 'backend-api');
+        self::assertTrue($this->reporter()->reportIfDue('web'));
+        self::assertSame('production', $this->transport->payloads[0]['deployment']['environment']);
+        self::assertSame('backend-api', $this->transport->payloads[0]['deployment']['service']);
+    }
+
+    public function test_changing_the_default_service_gets_separate_reporting_state(): void
+    {
+        $this->app['config']->set('app.name', 'First App');
+        $this->configure('service', null);
+        self::assertTrue($this->reporter()->reportIfDue('web'));
+        $this->app['config']->set('app.name', 'Second App');
+        $this->app->forgetInstance(Reporter::class);
+        self::assertTrue($this->reporter()->reportIfDue('web'));
+        self::assertNotSame($this->transport->payloads[0]['instance']['id'], $this->transport->payloads[1]['instance']['id']);
     }
 
     public function test_server_retry_after_is_respected(): void

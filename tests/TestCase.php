@@ -38,6 +38,8 @@ abstract class TestCase extends Orchestra
     protected function setUp(): void
     {
         parent::setUp();
+        // Exercise reporting as a deployed app; guard tests opt back into testing.
+        $this->app->instance('env', 'production');
         Carbon::setTestNow('2026-10-30 12:00:00 UTC');
         $this->transport = new RecordingTransport;
         $this->app->instance(Transport::class, $this->transport);

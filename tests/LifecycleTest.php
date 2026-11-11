@@ -18,6 +18,22 @@ use StackRadar\TransportException;
 
 final class LifecycleTest extends TestCase
 {
+    public function test_testing_apps_never_report_from_http_queue_or_manual_commands(): void
+    {
+        $this->app->instance('env', 'testing');
+        self::assertTrue($this->app->runningUnitTests());
+        Route::get('/healthy', fn () => 'healthy');
+
+        $this->get('/healthy')->assertOk()->assertSee('healthy');
+        $this->app['events']->dispatch(new Looping('database', 'default'));
+        $this->app['config']->set('queue.connections.database.driver', 'database');
+        $this->app['events']->dispatch(new JobProcessed('database', $this->createMock(Job::class)));
+        $this->artisan('stackradar:report')->expectsOutput('Report not sent: sdk_disabled')->assertFailed();
+
+        self::assertSame([], $this->transport->calls);
+        self::assertDirectoryDoesNotExist($this->cachePath);
+    }
+
     public function test_http_reports_at_termination_and_keeps_the_response_intact(): void
     {
         Route::get('/healthy', fn () => 'healthy');

@@ -12,15 +12,15 @@ composer require stackradar/laravel
 
 ## Configure
 
-Laravel discovers the package automatically. Add your Project's Ingest Key and environment:
+Laravel discovers the package automatically. Set your Project's Ingest Key in your deployment secrets or environment settings:
 
 ```dotenv
 STACKRADAR_INGEST_KEY=your-ingest-key
-STACKRADAR_ENVIRONMENT=production
-STACKRADAR_SERVICE=api
 ```
 
-Without a key, nothing is reported. Set `STACKRADAR_RELEASE` to identify deployments. Runtime reporting must be enabled for your organization in StackRadar.
+The environment defaults to `APP_ENV`. The service defaults to a slug of `APP_NAME`: `My Customer API` becomes `my-customer-api`. Override these with `STACKRADAR_ENVIRONMENT` and `STACKRADAR_SERVICE`. Use distinct service names for apps sharing a Project.
+
+Without a key, nothing is reported. Reporting is disabled during Laravel tests. Set `STACKRADAR_RELEASE` to identify deployments. Runtime reporting must be enabled for your organization in StackRadar.
 
 For other settings:
 
@@ -46,3 +46,7 @@ composer check
 ```
 
 Tests use Laravel Testbench and fake transports; they don't call StackRadar.
+
+## License
+
+[Apache 2.0](LICENSE).
