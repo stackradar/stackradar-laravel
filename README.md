@@ -4,7 +4,42 @@ See which Composer packages are deployed in each environment. The package report
 
 Supports Laravel 12+. Requires PHP 8.2+ and the PHP version required by your Laravel release.
 
-## Install
+## Install with your agent
+
+Open your application repository in your coding agent and paste this prompt.
+It targets production; name a different deployment in the prompt if needed.
+Keep your Ingest Key in your deployment's secret store, outside the prompt.
+
+```text
+Set up StackRadar runtime reporting for this Laravel app in production.
+Read https://github.com/stackradar/stackradar-laravel for the current
+installation and configuration reference, then make the changes in this app.
+
+1. Inspect the app's instructions, PHP/Laravel versions, deployment config
+   and secrets workflow. Confirm the production deployment and destination
+   StackRadar organization and Project; ask me for missing details.
+2. Install stackradar/laravel as a production Composer dependency and update
+   the lockfile. Laravel discovers the package automatically.
+3. Configure STACKRADAR_INGEST_KEY through the deployment's existing secret
+   management workflow. Have me enter the value directly there when needed.
+   Keep the value out of chat, tool output, command arguments and committed
+   files. Do not retrieve or copy it into a local .env for this setup.
+4. Check the environment and service names, set STACKRADAR_RELEASE from the
+   deployment's release identifier, and select an existing persistent cache
+   store with atomic locks. Use configuration supported by this app and host;
+   ephemeral or read-only filesystems need a suitable shared store.
+5. Run relevant checks and follow this repository's release process. Prepare
+   reviewable changes before requesting any required deployment approval.
+   Ensure web processes and long-lived queue workers pick up the new config.
+6. Verify a fresh report in the intended StackRadar Project from the deployed
+   app, with the correct environment, service, release and installed packages.
+   Check automatic web and queue reporting through normal activity where
+   applicable. A local or CLI-only report does not prove production web and
+   queue reporting. If access or approval blocks verification, state exactly
+   what remains; distinguish installed, deployed and verified in your summary.
+```
+
+## Manual installation
 
 ```bash
 composer require stackradar/laravel
