@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 0.1.0'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: v${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate release
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo '::error::Run releases from main.'
+            exit 1
+          fi
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo '::error::Use a stable version such as 0.1.0.'
+            exit 1
+          fi
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          tag_commit="$(git rev-parse --verify "refs/tags/$TAG^{commit}" 2>/dev/null || true)"
+          if [[ -n "$tag_commit" && "$tag_commit" != "$GITHUB_SHA" ]]; then
+            echo '::error::That version already points to a different commit.'
+            exit 1
+          fi
+      - name: Check CI passed for this commit
+        run: |
+          set -euo pipefail
+          ci_url="$(
+            gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+              --branch main --event push --commit "$GITHUB_SHA" \
+              --json headSha,status,conclusion,url --limit 20 \
+              | jq -r --arg sha "$GITHUB_SHA" \
+                '[.[] | select(.headSha == $sha and .status == "completed" and .conclusion == "success")][0].url // empty'
+          )"
+          if [[ -z "$ci_url" ]]; then
+            echo '::error::Wait for CI on this main commit to pass, then rerun Release.'
+            exit 1
+          fi
+          echo "CI passed: $ci_url"
+      - name: Publish tag and release
+        run: |
+          set -euo pipefail
+          if ! git show-ref --verify --quiet "refs/tags/$TAG"; then
+            git tag "$TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --generate-notes --title "$TAG"
+          fi

@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: ['**']
   pull_request:
 
 permissions:
@@ -27,7 +28,7 @@ jobs:
           path: laravel-sdk
       - uses: actions/checkout@v4
         with:
-          repository: stackradar/php-sdk
+          repository: stackradar/stackradar-php
           # Override to test a core SDK branch alongside this package.
           ref: ${{ vars.PHP_SDK_REF || 'main' }}
           token: ${{ secrets.STACKRADAR_PACKAGES_TOKEN || github.token }}
