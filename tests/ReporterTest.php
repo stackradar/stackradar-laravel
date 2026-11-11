@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace StackRadar\Laravel\Tests;
 
+use Composer\InstalledVersions;
 use Illuminate\Cache\Events\CacheHit;
 use Illuminate\Cache\FileStore;
 use Illuminate\Cache\Repository;
@@ -95,9 +96,9 @@ final class ReporterTest extends TestCase
     }
 
     #[DataProvider('stopStatuses')]
-    public function test_stop_responses_persist_across_requests_and_even_manual_reporting(int $status): void
+    public function test_stop_responses_persist_across_requests_and_even_manual_reporting(int $status, ?string $reason): void
     {
-        $this->transport->failure = new TransportException('Stopped', $status);
+        $this->transport->failure = new TransportException('Stopped', $status, reason: $reason);
         self::assertFalse($this->reporter()->reportIfDue('web'));
         $this->app->forgetInstance(Reporter::class);
         Carbon::setTestNow(Carbon::now()->addDay());
@@ -110,7 +111,132 @@ final class ReporterTest extends TestCase
 
     public static function stopStatuses(): array
     {
-        return [[401], [403], [410]];
+        return [[401, 'invalid_ingest_key'], [410, null]];
+    }
+
+    #[DataProvider('temporaryAuthResponses')]
+    public function test_temporary_auth_failures_recover_without_a_deploy(int $status, ?string $reason): void
+    {
+        $this->transport->failure = new TransportException('Not available', $status, reason: $reason);
+        self::assertFalse($this->reporter()->reportIfDue('web'));
+        $first = $this->transport->payloads[0]['instance'];
+        $this->app->forgetInstance(Reporter::class);
+        Carbon::setTestNow(Carbon::now()->addSeconds(3599));
+        self::assertFalse($this->reporter()->reportIfDue('web'));
+        self::assertCount(1, $this->transport->payloads);
+        Carbon::setTestNow(Carbon::now()->addSecond());
+        $this->transport->failure = null;
+        self::assertTrue($this->reporter()->reportIfDue('web'));
+        self::assertSame($first, $this->transport->payloads[1]['instance']);
+    }
+
+    public static function temporaryAuthResponses(): array
+    {
+        return [[403, 'runtime_reporting_disabled'], [403, null], [401, null], [401, 'proxy_authentication_required']];
+    }
+
+    public function test_retry_after_zero_waits_at_least_a_minute(): void
+    {
+        $this->transport->failure = new TransportException('Limited', 429, 0);
+        self::assertFalse($this->reporter()->reportIfDue('web'));
+        Carbon::setTestNow(Carbon::now()->addSeconds(59));
+        self::assertFalse($this->reporter()->reportIfDue('web'));
+        self::assertCount(1, $this->transport->payloads);
+        Carbon::setTestNow(Carbon::now()->addSecond());
+        $this->transport->failure = null;
+        self::assertTrue($this->reporter()->reportIfDue('web'));
+    }
+
+    public function test_old_and_restarted_workers_cannot_share_stale_inventory_without_release_metadata(): void
+    {
+        $original = InstalledVersions::getAllRawData()[0];
+        $data = $original;
+        $data['root']['install_path'] = $this->cachePath.'/project-with-custom-vendor';
+        $data['versions'] = ['vendor/package' => ['version' => '1.0.0.0', 'pretty_version' => '1.0.0', 'dev_requirement' => false]];
+        $this->configure('release', null);
+        try {
+            InstalledVersions::reload($data);
+            $oldWorker = new Client($this->transport);
+            $oldWorker->inventoryFingerprint();
+            $expectedOld = $oldWorker->collectInventory()->hash();
+            $data['versions']['vendor/package']['version'] = '2.0.0.0';
+            $data['versions']['vendor/package']['pretty_version'] = '2.0.0';
+            InstalledVersions::reload($data);
+
+            // The old worker reports after deployment but still observes its loaded v1 metadata.
+            $this->app->instance(Client::class, $oldWorker);
+            self::assertTrue($this->reporter()->reportIfDue('queue'));
+            $oldHash = $this->transport->payloads[0]['packages']['inventory_hash'];
+            self::assertSame($expectedOld, $oldHash);
+
+            $this->app->forgetInstance(Reporter::class);
+            $freshWorker = new Client($this->transport);
+            $expectedNew = $freshWorker->collectInventory()->hash();
+            $this->app->instance(Client::class, $freshWorker);
+            self::assertTrue($this->reporter()->reportIfDue('queue'));
+            $newHash = $this->transport->payloads[1]['packages']['inventory_hash'];
+            self::assertSame($expectedNew, $newHash);
+            self::assertNotSame($oldHash, $newHash);
+            self::assertNotSame($this->transport->payloads[0]['instance']['id'], $this->transport->payloads[1]['instance']['id']);
+        } finally {
+            InstalledVersions::reload($original);
+        }
+    }
+
+    public function test_a_persistent_cache_outage_uses_a_local_cooldown_and_logs_only_when_requested(): void
+    {
+        $this->configure('debug', true);
+        $cache = $this->createMock(Factory::class);
+        $cache->expects(self::exactly(2))->method('store')->willThrowException(new RuntimeException('Redis unavailable'));
+        $this->app->instance(Factory::class, $cache);
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::exactly(2))->method('warning');
+        $this->app->instance(LoggerInterface::class, $logger);
+        self::assertFalse($this->reporter()->reportIfDue('queue'));
+        self::assertFalse($this->reporter()->reportIfDue('queue'));
+        Carbon::setTestNow(Carbon::now()->addMinutes(10));
+        self::assertFalse($this->reporter()->reportIfDue('queue'));
+        self::assertSame([], $this->transport->calls);
+    }
+
+    public function test_fresh_fpm_reporters_do_not_flood_logs_when_the_cache_is_broken(): void
+    {
+        $cache = $this->createMock(Factory::class);
+        $cache->method('store')->willThrowException(new RuntimeException('Storage unavailable'));
+        $this->app->instance(Factory::class, $cache);
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::never())->method('warning');
+        $this->app->instance(LoggerInterface::class, $logger);
+        for ($i = 0; $i < 3; $i++) {
+            $this->app->forgetInstance(Reporter::class);
+            self::assertFalse($this->reporter()->reportIfDue('web'));
+        }
+    }
+
+    public function test_diagnostics_include_the_safe_reason_but_never_the_key_or_message(): void
+    {
+        $this->configure('debug', true);
+        $this->transport->failure = new TransportException('Sensitive upstream response', 422, reason: 'instance_limit');
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects(self::once())->method('warning')->with('StackRadar runtime report failed.', self::callback(function (array $context): bool {
+            self::assertSame('instance_limit', $context['reason']);
+            self::assertSame(422, $context['status']);
+            self::assertStringNotContainsString('Sensitive', json_encode($context));
+            self::assertStringNotContainsString('test-project-token', json_encode($context));
+
+            return true;
+        }));
+        $this->app->instance(LoggerInterface::class, $logger);
+        self::assertFalse($this->reporter()->reportIfDue('web'));
+    }
+
+    public function test_debug_dumps_redact_the_ingest_key(): void
+    {
+        ob_start();
+        var_dump($this->reporter());
+        $dump = ob_get_clean();
+        self::assertStringNotContainsString('test-project-token', $dump);
+        self::assertStringContainsString('[redacted]', $dump);
     }
 
     public function test_an_inventory_rejection_preserves_heartbeats_without_repeating_the_upload(): void
@@ -248,6 +374,7 @@ final class ReporterTest extends TestCase
 
     public function test_collection_and_logger_failures_do_not_escape(): void
     {
+        $this->configure('debug', true);
         $inventory = $this->createMock(Inventory::class);
         $inventory->method('collect')->willThrowException(new RuntimeException('Collection failed'));
         $this->app->instance(Client::class, new Client($this->transport, $inventory));

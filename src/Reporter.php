@@ -14,6 +14,7 @@ use Illuminate\Support\Carbon;
 use LengthException;
 use LogicException;
 use Psr\Log\LoggerInterface;
+use SensitiveParameter;
 use StackRadar\Client;
 use StackRadar\PackageInventory;
 use StackRadar\TransportException;
@@ -23,28 +24,51 @@ final class Reporter
 {
     private const HEARTBEAT_INTERVAL = 600;
 
+    private const AUTH_RETRY_INTERVAL = 3600;
+
+    /** @var array<string, int> */
+    private array $localNextAttempt = [];
+
     /**
      * @param  array<string, mixed>  $options
      * @param  Closure(): Client  $client
      */
     public function __construct(
-        private readonly array $options,
+        #[SensitiveParameter] private readonly array $options,
         private readonly Factory $cache,
         private readonly Closure $client,
         private readonly LoggerInterface $logger,
         private readonly string $applicationPath,
     ) {}
 
+    /** @return array<string, mixed> */
+    public function __debugInfo(): array
+    {
+        return ['options' => array_replace($this->options, ['ingest_key' => '[redacted]'])];
+    }
+
     public function reportIfDue(string $role, bool $force = false): bool
     {
+        $now = Carbon::now()->getTimestamp();
+        if (! $force && ($this->localNextAttempt[$role] ?? 0) > $now) {
+            return false;
+        }
+        $this->localNextAttempt[$role] = $now + self::HEARTBEAT_INTERVAL;
         try {
             return $this->report($role, $force);
         } catch (Throwable $exception) {
+            if ($this->localNextAttempt[$role] <= Carbon::now()->getTimestamp()) {
+                $this->localNextAttempt[$role] = Carbon::now()->getTimestamp() + self::HEARTBEAT_INTERVAL;
+            }
             try {
-                $this->logger->warning('StackRadar runtime report failed.', [
-                    'exception_type' => $exception::class,
-                    'status' => $exception instanceof TransportException ? $exception->getCode() : null,
-                ]);
+                if ($this->options['debug'] ?? false) {
+                    $this->logger->warning('StackRadar runtime report failed.', [
+                        'exception_type' => $exception::class,
+                        'status' => $exception instanceof TransportException ? $exception->getCode() : null,
+                        'reason' => $exception instanceof TransportException
+                            && preg_match('/\A[a-z0-9_]{1,100}\z/', $exception->reason ?? '') === 1 ? $exception->reason : null,
+                    ]);
+                }
             } catch (Throwable) {
                 // Application telemetry must also tolerate a broken logger.
             }
@@ -64,19 +88,19 @@ final class Reporter
         }
 
         $root = InstalledVersions::getRootPackage();
-        $metadata = $root['install_path'].'/vendor/composer/installed.php';
-        clearstatcache(true, $metadata);
+        $client = ($this->client)();
         $key = 'stackradar:'.hash('sha256', json_encode([
             $options['ingest_key'], $options['ingest_url'], $options['environment'], $options['service'],
             $options['release'], $options['artifact'],
             $this->applicationPath, gethostname(), PHP_VERSION, PHP_SAPI, $role,
-            is_file($metadata) ? [filemtime($metadata), filesize($metadata)] : null,
+            $client->inventoryFingerprint(),
         ], JSON_THROW_ON_ERROR));
         $cache = $this->cache->store($options['cache_store']);
         if (! $cache instanceof Repository || $cache->getStore() instanceof ArrayStore || ! $cache->getStore() instanceof LockProvider) {
             throw new LogicException('StackRadar needs a persistent cache store supporting atomic locks.');
         }
         $state = $cache->get($key, []);
+        $this->localNextAttempt[$role] = $state['next_attempt_at'] ?? $this->localNextAttempt[$role];
         if (($state['stopped'] ?? false) || (! $force && ($state['next_attempt_at'] ?? 0) > Carbon::now()->getTimestamp())) {
             return false;
         }
@@ -95,12 +119,13 @@ final class Reporter
                 ];
                 $this->save($cache, $key, $state);
             }
+            $this->localNextAttempt[$role] = $state['next_attempt_at'];
             if (($state['stopped'] ?? false) || (! $force && $state['next_attempt_at'] > $now)) {
                 return false;
             }
             $state['next_attempt_at'] = $now + self::HEARTBEAT_INTERVAL;
+            $this->localNextAttempt[$role] = $state['next_attempt_at'];
             $this->save($cache, $key, $state);
-            $client = ($this->client)();
 
             $cached = ($state['inventory_blocked'] ?? false) ? null : $cache->get($key.':inventory');
             if ($cached === null && ! ($state['inventory_blocked'] ?? false)) {
@@ -132,14 +157,17 @@ final class Reporter
                     ],
                 ], $inventory, isset($state['inventory_error']) ? [['code' => $state['inventory_error']]] : []);
             } catch (TransportException $exception) {
-                if (in_array($exception->getCode(), [401, 403, 410], true)) {
+                if (($exception->getCode() === 401 && $exception->reason === 'invalid_ingest_key') || $exception->getCode() === 410) {
                     $state['stopped'] = true;
+                } elseif (in_array($exception->getCode(), [401, 403], true)) {
+                    $state['next_attempt_at'] = $now + max(self::AUTH_RETRY_INTERVAL, $exception->retryAfter ?? 0);
                 } elseif ($exception->getCode() === 429 && $exception->retryAfter !== null) {
-                    $state['next_attempt_at'] = $now + $exception->retryAfter;
+                    $state['next_attempt_at'] = $now + max(60, $exception->retryAfter);
                 } elseif ($exception->inventoryUpload && in_array($exception->getCode(), [413, 422], true)) {
                     $state['inventory_blocked'] = true;
                     $state['inventory_error'] = $exception->reason ?? 'inventory_rejected';
                 }
+                $this->localNextAttempt[$role] = $state['next_attempt_at'];
                 $this->save($cache, $key, $state);
                 throw $exception;
             }

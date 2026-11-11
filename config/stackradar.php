@@ -2,6 +2,7 @@
 
 return [
     'enabled' => env('STACKRADAR_ENABLED', true),
+    'debug' => env('STACKRADAR_DEBUG', false),
     'ingest_key' => env('STACKRADAR_INGEST_KEY'),
     'environment' => env('STACKRADAR_ENVIRONMENT'),
     'service' => env('STACKRADAR_SERVICE'),

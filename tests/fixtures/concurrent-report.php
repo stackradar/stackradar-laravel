@@ -2,6 +2,10 @@
 
 declare(strict_types=1);
 
+if (PHP_SAPI !== 'cli' || ! isset($argv[1])) {
+    exit(1);
+}
+
 use Illuminate\Cache\CacheManager;
 use Illuminate\Config\Repository;
 use Illuminate\Container\Container;

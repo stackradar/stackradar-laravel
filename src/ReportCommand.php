@@ -15,7 +15,7 @@ final class ReportCommand extends Command
     public function handle(Reporter $reporter): int
     {
         if (! $reporter->reportIfDue('cli', force: true)) {
-            $this->error('Report not sent. Check StackRadar configuration, logs, or an active reporting lock.');
+            $this->error('Report not sent. Check StackRadar configuration or enable STACKRADAR_DEBUG for diagnostics.');
 
             return self::FAILURE;
         }
