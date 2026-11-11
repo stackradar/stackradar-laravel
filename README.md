@@ -66,25 +66,56 @@ This forces the CLI reporter past its interval/startup delay, while respecting a
 
 Each fresh CI/container cache can create a new CLI reporter identity. The API currently allows 2,000 live identities per Project, with observations remaining live for three heartbeat intervals (30 minutes). Roles and overlapping deployment generations also count. Avoid adding this command to every CI run unless CLI observations are intended; a large or frequently deployed fleet can hit `instance_limit`. Enable diagnostics to see that reason. This SDK does not raise server limits. The command exits unsuccessfully when disabled, unconfigured, locked, stopped, or unsuccessful.
 
-## Development
+## Trying the private packages before a release
 
-Keep the repositories side by side:
+Add both VCS repositories to the consuming application's root `composer.json`. Composer does not import repository definitions from dependencies.
 
-```text
-php-libs/
-  php-sdk/
-  laravel-sdk/
+```json
+{
+  "repositories": [
+    {"type": "vcs", "url": "https://github.com/stackradar/php-sdk"},
+    {"type": "vcs", "url": "https://github.com/stackradar/laravel-sdk"}
+  ],
+  "require": {
+    "stackradar/php": "dev-runtime-ingest-v1 as 0.1.0",
+    "stackradar/laravel": "dev-runtime-ingest-v1"
+  }
+}
 ```
 
+These are additions to the application's existing manifest. The temporary inline alias satisfies the integration's `stackradar/php:^0.1` requirement before a core release exists. Both branch references are explicit, so a global `minimum-stability: dev` setting is unnecessary. Run the targeted Composer update locally and commit `composer.lock`; deployment should use `composer install` to install those locked commits. Replace the branch constraints with released versions when available.
+
+Private GitHub repositories need Composer authentication independently of the application's source checkout. Supply a read-only token for these two repositories through Composer's `COMPOSER_AUTH` secret (`github-oauth.github.com`); never commit the token or embed it in repository URLs.
+
+On Laravel Cloud, supply that JSON authentication value through the existing secrets/configuration workflow and export it before Composer runs:
+
 ```bash
-cd ../php-sdk && composer install
-cd ../laravel-sdk
-bin/install-local
+export COMPOSER_AUTH
+composer install --no-dev --no-interaction --prefer-dist
+```
+
+Use a fine-grained GitHub token with read-only repository contents/metadata access limited to the two SDK repositories. The app's GitHub source connection is not a substitute for explicit Composer authentication. Keep this download credential separate from `STACKRADAR_INGEST_KEY`, which authenticates runtime reports. Do not assume a linked Cloud secret is build-only.
+
+## Development
+
+Clone this repository, then use ordinary Composer VCS configuration in an ignored local manifest while the core package is unreleased:
+
+```bash
+cp composer.json composer.local.json
+COMPOSER=composer.local.json composer config repositories.stackradar-php vcs https://github.com/stackradar/php-sdk
+COMPOSER=composer.local.json composer require --no-update 'stackradar/php:dev-runtime-ingest-v1 as 0.1.0'
+COMPOSER=composer.local.json composer update
 composer check
 ```
 
-The local installer generates ignored Composer metadata linking the sibling SDK; production Composer metadata contains no developer paths. Tests require PHP 8.3+ because they use PHPUnit 11. Testbench, fake transports, temporary file caches and separate PHP processes cover lifecycle, stable identity, caching, concurrent leases, startup jitter, stop decisions, retries and rejected inventories. Tests send no external API requests.
+The canonical package manifest retains its release constraint, and the local manifest/lock remain ignored. Tests require PHP 8.3+ because they use PHPUnit 11. Testbench, fake transports, temporary file caches and separate PHP processes cover lifecycle, stable identity, caching, concurrent leases, startup jitter, stop decisions, retries and rejected inventories. Tests send no external API requests.
 
-Distribution archives exclude tests, fixtures, `bin/install-local`, and analysis/test configuration; use a source checkout for development.
+Distribution archives exclude tests, fixtures, and analysis/test configuration; use a source checkout for development.
 
 See the PHP SDK README for the wire contract and its name/version-only limitation for moving development branches. The repository is private and no package release has been published. License metadata remains proprietary pending a distribution decision.
+
+## Deployment check-ins
+
+`php artisan stackradar:report` already sends one immediate CLI report and exits. It can smoke-test the credentials and ingest handshake. On platforms whose deploy commands run before traffic switches, it observes the candidate release, not proof that the release became live. A deployment can fail after the check-in.
+
+It is therefore not a replacement for web/worker check-ins. A one-off report becomes stale after the API's live window and cannot observe later instance drift. Keep normal lifecycle reporting enabled when the goal is to confirm what the serving application runs. Use the deploy command only as an optional diagnostic and decide explicitly whether reporting failure should block deployment; the command returns a non-zero exit code on failure.
