@@ -4,9 +4,11 @@ Laravel 12/13 integration for Runtime Ingest Protocol v1, depending on the separ
 
 ## Server compatibility
 
-**PHP ingestion is not enabled by the landed v0 implementation.** As of v0 main `a69ddbb` (2026-11-05), its runtime allowlist excludes PHP, its inventory allowlist excludes Composer, and its snapshot processor hard-codes npm. These server changes are needed before this integration can ingest PHP successfully, in addition to the organization's `multi-source-projects` feature being enabled.
+PHP runtime reports and Composer inventories are supported by Runtime Ingest v1, following the server changes merged in v0 PR #784 (`4eb7d27`). The integration's payload, hash algorithm and response handling already match that contract; no protocol upgrade or additional package fields are required.
 
-The SDK matches the landed field names, hashing, routes and response behavior. A generated report was checked against the actual server validator: only the two unsupported runtime/ecosystem fields fail. No server files, feature toggles or production data were changed. The packages remain unpublished.
+Generated PHP reports were checked against the merged server validator, including nullable deployment fields, empty inventories, collection failures and multiple versions of one package. Inventory hashes match the server implementation. Production endpoint access has not been exercised from this workspace.
+
+A valid Project Ingest Key and the organization's `multi-source-projects` feature are required. The SDK does not enable the feature or alter repository exposures. The packages remain unpublished.
 
 ## Configuration
 
