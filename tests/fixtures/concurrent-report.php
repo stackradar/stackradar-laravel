@@ -15,7 +15,13 @@ use StackRadar\Client;
 use StackRadar\Laravel\Reporter;
 use StackRadar\Transport;
 
-require dirname(__DIR__, 2).'/vendor/autoload.php';
+// Older dependencies can emit deprecations during autoloading on newer PHP.
+set_error_handler(static fn (int $severity, string $message, string $file): bool => str_contains($file, '/vendor/'), E_DEPRECATED);
+try {
+    require dirname(__DIR__, 2).'/vendor/autoload.php';
+} finally {
+    restore_error_handler();
+}
 
 $directory = $argv[1];
 $app = new Container;
