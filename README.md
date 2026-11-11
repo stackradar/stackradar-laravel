@@ -30,6 +30,8 @@ php artisan vendor:publish --tag=stackradar-config
 
 Use `STACKRADAR_CACHE_STORE` to select a persistent cache with atomic locks; the default is `file`. Set `STACKRADAR_DEBUG=true` for diagnostics. Invalid keys and rejected inventories warn once without enabling debug.
 
+On Vapor or read-only containers, set `STACKRADAR_CACHE_STORE` to `redis` or `dynamodb`.
+
 ## Check the connection
 
 ```bash

@@ -9,6 +9,7 @@ use Illuminate\Cache\Events\CacheHit;
 use Illuminate\Cache\FileStore;
 use Illuminate\Cache\Repository;
 use Illuminate\Contracts\Cache\Factory;
+use Illuminate\Contracts\Cache\Store;
 use Illuminate\Filesystem\Filesystem;
 use Illuminate\Support\Carbon;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -197,6 +198,7 @@ final class ReporterTest extends TestCase
         $this->app->instance(LoggerInterface::class, $logger);
         self::assertFalse($this->reporter()->reportIfDue('queue'));
         self::assertFalse($this->reporter()->reportIfDue('queue'));
+        self::assertSame('cache_unavailable', $this->reporter()->lastFailure()['reason']);
         Carbon::setTestNow(Carbon::now()->addMinutes(10));
         self::assertFalse($this->reporter()->reportIfDue('queue'));
         self::assertSame([], $this->transport->calls);
@@ -483,6 +485,48 @@ final class ReporterTest extends TestCase
         $this->configure('cache_store', 'array');
         self::assertFalse($this->reporter()->reportIfDue('web'));
         self::assertSame([], $this->transport->payloads);
+        self::assertSame('cache_store_not_persistent', $this->reporter()->lastFailure()['reason']);
+    }
+
+    public function test_the_manual_command_identifies_a_cache_without_atomic_locks(): void
+    {
+        $cache = $this->createMock(Factory::class);
+        $cache->method('store')->willReturn(new Repository($this->createMock(Store::class)));
+        $this->app->instance(Factory::class, $cache);
+        $this->artisan('stackradar:report')->expectsOutput('Report not sent: cache_locks_unsupported')->assertFailed();
+        self::assertSame([], $this->transport->calls);
+    }
+
+    public function test_cache_read_errors_have_a_safe_specific_reason(): void
+    {
+        $store = $this->getMockBuilder(FileStore::class)->setConstructorArgs([new Filesystem, $this->cachePath])->onlyMethods(['get'])->getMock();
+        $store->method('get')->willThrowException(new RuntimeException('Sensitive database credentials'));
+        $cache = $this->createMock(Factory::class);
+        $cache->method('store')->willReturn(new Repository($store));
+        $this->app->instance(Factory::class, $cache);
+        $this->artisan('stackradar:report')->expectsOutput('Report not sent: cache_read_failed')->assertFailed();
+        self::assertSame([], $this->transport->calls);
+    }
+
+    public function test_an_unwritable_file_cache_identifies_a_lock_failure(): void
+    {
+        mkdir($this->cachePath, 0777, true);
+        $blocked = $this->cachePath.'/blocked';
+        file_put_contents($blocked, 'A file prevents creating cache directories here.');
+        $this->app['config']->set('cache.stores.file.path', $blocked);
+        $this->artisan('stackradar:report')->expectsOutput('Report not sent: cache_lock_failed')->assertFailed();
+        self::assertSame([], $this->transport->calls);
+    }
+
+    public function test_cache_write_exceptions_have_a_safe_specific_reason(): void
+    {
+        $store = $this->getMockBuilder(FileStore::class)->setConstructorArgs([new Filesystem, $this->cachePath])->onlyMethods(['put'])->getMock();
+        $store->method('put')->willThrowException(new RuntimeException('Read-only filesystem: /sensitive/path'));
+        $cache = $this->createMock(Factory::class);
+        $cache->method('store')->willReturn(new Repository($store));
+        $this->app->instance(Factory::class, $cache);
+        $this->artisan('stackradar:report')->expectsOutput('Report not sent: cache_write_failed')->assertFailed();
+        self::assertSame([], $this->transport->calls);
     }
 
     public function test_a_broken_cache_does_not_trigger_unthrottled_uploads_or_escape(): void
@@ -509,6 +553,7 @@ final class ReporterTest extends TestCase
 
         self::assertFalse($this->reporter()->reportIfDue('web'));
         self::assertSame([], $this->transport->payloads);
+        self::assertSame('cache_write_failed', $this->reporter()->lastFailure()['reason']);
     }
 
     public function test_collection_and_logger_failures_do_not_escape(): void

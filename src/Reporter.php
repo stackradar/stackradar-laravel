@@ -11,10 +11,10 @@ use Illuminate\Contracts\Cache\Factory;
 use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Support\Carbon;
 use LengthException;
-use LogicException;
 use Psr\Log\LoggerInterface;
 use SensitiveParameterValue;
 use StackRadar\Client;
+use StackRadar\ConfigurationException;
 use StackRadar\PackageInventory;
 use StackRadar\TransportException;
 use Throwable;
@@ -110,7 +110,7 @@ final class Reporter
             return false;
         }
         if ((int) $options['startup_delay'] < 0 || (int) $options['startup_jitter'] < 0) {
-            throw new LogicException('StackRadar reporting intervals are invalid.');
+            throw new ConfigurationException('StackRadar reporting intervals are invalid.', 'invalid_reporting_interval');
         }
 
         $client = ($this->services()['client'])();
@@ -120,11 +120,14 @@ final class Reporter
             $this->applicationPath, gethostname(), PHP_VERSION, PHP_SAPI, $role,
             $client->inventoryFingerprint(),
         ], JSON_THROW_ON_ERROR));
-        $cache = $this->services()['cache']->store($options['cache_store']);
-        if (! $cache instanceof Repository || $cache->getStore() instanceof ArrayStore || ! $cache->getStore() instanceof LockProvider) {
-            throw new LogicException('StackRadar needs a persistent cache store supporting atomic locks.');
+        $cache = $this->cacheOperation(fn () => $this->services()['cache']->store($options['cache_store']), 'cache_unavailable');
+        if (! $cache instanceof Repository || ! $cache->getStore() instanceof LockProvider) {
+            throw new TransportException('StackRadar needs a cache store supporting atomic locks.', reason: 'cache_locks_unsupported');
         }
-        $state = $cache->get($key, []);
+        if ($cache->getStore() instanceof ArrayStore) {
+            throw new TransportException('StackRadar needs a persistent cache store.', reason: 'cache_store_not_persistent');
+        }
+        $state = $this->cacheOperation(fn () => $cache->get($key, []), 'cache_read_failed');
         $this->localNextAttempt[$role] = $state['next_attempt_at'] ?? $this->localNextAttempt[$role];
         if ($state['stopped'] ?? false) {
             $this->lastFailure = $state['failure'] ?? ['status' => null, 'reason' => 'reporting_stopped'];
@@ -135,8 +138,8 @@ final class Reporter
         if (! $force && ($state['next_attempt_at'] ?? 0) > Carbon::now()->getTimestamp()) {
             return false;
         }
-        $lease = $cache->getStore()->lock($key.':lock', max(15, (int) ceil((float) $options['timeout']) + 5));
-        if (! $lease->get()) {
+        $lease = $this->cacheOperation(fn () => $cache->getStore()->lock($key.':lock', max(15, (int) ceil((float) $options['timeout']) + 5)), 'cache_lock_failed');
+        if (! $this->cacheOperation(fn () => $lease->get(), 'cache_lock_failed')) {
             $this->lastFailure = ['status' => null, 'reason' => 'report_in_progress'];
             $this->pause($role);
 
@@ -144,7 +147,7 @@ final class Reporter
         }
 
         try {
-            $state = $cache->get($key, []);
+            $state = $this->cacheOperation(fn () => $cache->get($key, []), 'cache_read_failed');
             $now = Carbon::now()->getTimestamp();
             if ($state === []) {
                 $state = [
@@ -167,7 +170,7 @@ final class Reporter
             $this->localNextAttempt[$role] = $state['next_attempt_at'];
             $this->save($cache, $key, $state);
 
-            $cached = ($state['inventory_blocked'] ?? false) ? null : $cache->get($key.':inventory');
+            $cached = ($state['inventory_blocked'] ?? false) ? null : $this->cacheOperation(fn () => $cache->get($key.':inventory'), 'cache_read_failed');
             if ($cached === null && ! ($state['inventory_blocked'] ?? false)) {
                 try {
                     $cached = $client->collectInventory()->payload();
@@ -228,15 +231,30 @@ final class Reporter
 
             return true;
         } finally {
-            $lease->release();
+            $this->cacheOperation(fn () => $lease->release(), 'cache_lock_failed');
         }
     }
 
     /** @param array<string, mixed> $state */
     private function save(Repository $cache, string $key, array $state): void
     {
-        if (! $cache->put($key, $state, 2592000)) {
-            throw new LogicException('Unable to persist StackRadar reporting state.');
+        if (! $this->cacheOperation(fn () => $cache->put($key, $state, 2592000), 'cache_write_failed')) {
+            throw new TransportException('Unable to persist StackRadar reporting state.', reason: 'cache_write_failed');
+        }
+    }
+
+    /**
+     * @template T
+     *
+     * @param  Closure(): T  $operation
+     * @return T
+     */
+    private function cacheOperation(Closure $operation, string $reason): mixed
+    {
+        try {
+            return $operation();
+        } catch (Throwable) {
+            throw new TransportException('StackRadar cache operation failed.', reason: $reason);
         }
     }
 
@@ -256,10 +274,11 @@ final class Reporter
     /** @return array{status: int|null, reason: string} */
     private function failure(Throwable $exception): array
     {
+        $reason = $exception instanceof TransportException || $exception instanceof ConfigurationException ? $exception->reason : null;
+
         return [
             'status' => $exception instanceof TransportException ? $exception->getCode() : null,
-            'reason' => $exception instanceof TransportException && preg_match('/\A[a-z0-9_]{1,100}\z/', $exception->reason ?? '') === 1
-                ? $exception->reason : 'report_failed',
+            'reason' => preg_match('/\A[a-z0-9_]{1,100}\z/', $reason ?? '') === 1 ? $reason : 'report_failed',
         ];
     }
 

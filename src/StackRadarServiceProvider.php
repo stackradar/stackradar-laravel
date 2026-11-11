@@ -31,6 +31,7 @@ final class StackRadarServiceProvider extends ServiceProvider
         $this->app->singleton(Client::class, fn ($app) => new Client(
             transport: $app->make(Transport::class),
             timeout: (float) $app['config']->get('stackradar.timeout'),
+            reporterName: 'stackradar/laravel',
         ));
 
         $this->app->singleton(Reporter::class, function ($app): Reporter {

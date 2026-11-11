@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace StackRadar\Laravel\Tests;
 
+use Composer\InstalledVersions;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Contracts\Queue\Job;
 use Illuminate\Http\Request;
@@ -14,10 +15,29 @@ use Laravel\Octane\ApplicationGateway;
 use Laravel\Octane\OctaneServiceProvider;
 use RuntimeException;
 use StackRadar\Laravel\Reporter;
+use StackRadar\Transport;
 use StackRadar\TransportException;
 
 final class LifecycleTest extends TestCase
 {
+    public function test_the_laravel_package_is_identified_in_the_report(): void
+    {
+        $this->artisan('stackradar:report')->assertSuccessful();
+        self::assertSame([
+            'name' => 'stackradar/laravel',
+            'version' => InstalledVersions::getPrettyVersion('stackradar/laravel'),
+        ], $this->transport->payloads[0]['reporter']);
+    }
+
+    public function test_the_manual_command_identifies_an_invalid_ingest_url_without_echoing_it(): void
+    {
+        $this->configure('ingest_url', 'https://sensitive.example.test/unexpected-path');
+        $this->app->forgetInstance(Transport::class);
+        $this->artisan('stackradar:report')->expectsOutput('Report not sent: invalid_ingest_url')->assertFailed();
+        self::assertSame([], $this->transport->calls);
+        self::assertSame('invalid_ingest_url', $this->reporter()->lastFailure()['reason']);
+    }
+
     public function test_testing_apps_never_report_from_http_queue_or_manual_commands(): void
     {
         $this->app->instance('env', 'testing');
