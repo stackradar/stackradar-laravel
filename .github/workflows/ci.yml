@@ -24,16 +24,6 @@ jobs:
             laravel: '13.*'
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: laravel-sdk
-      - uses: actions/checkout@v4
-        with:
-          repository: stackradar/stackradar-php
-          # Override to test a core SDK branch alongside this package.
-          ref: ${{ vars.PHP_SDK_REF || 'main' }}
-          token: ${{ secrets.STACKRADAR_PACKAGES_TOKEN || github.token }}
-          persist-credentials: false
-          path: php-sdk
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
@@ -42,9 +32,7 @@ jobs:
           coverage: none
       - run: composer validate --strict
       - name: Select dependencies
-        run: |
-          composer config repositories.stackradar-php '{"type":"path","url":"../php-sdk","options":{"versions":{"stackradar/php":"0.1.0"}}}'
-          composer require --dev --no-update 'laravel/framework:${{ matrix.laravel }}' 'orchestra/testbench:${{ matrix.laravel == '12.*' && '^10.0' || '^11.0' }}'
+        run: composer require --dev --no-update 'laravel/framework:${{ matrix.laravel }}' 'orchestra/testbench:${{ matrix.laravel == '12.*' && '^10.0' || '^11.0' }}'
       - name: Install dependencies
         run: composer update --prefer-dist --prefer-stable --no-interaction --no-progress
         env:
@@ -53,6 +41,3 @@ jobs:
       - run: composer test
       - run: vendor/bin/pint --test
         if: matrix.php == '8.3' && matrix.laravel == '12.*' && matrix.dependencies == 'highest'
-    defaults:
-      run:
-        working-directory: laravel-sdk
