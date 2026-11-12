@@ -54,6 +54,18 @@ final class LifecycleTest extends TestCase
         self::assertDirectoryDoesNotExist($this->cachePath);
     }
 
+    public function test_the_queue_listener_never_pauses_the_worker(): void
+    {
+        // The first loop reports and the second is not due yet.
+        self::assertNull($this->app['events']->until(new Looping('database', 'default')));
+        self::assertNull($this->app['events']->until(new Looping('database', 'default')));
+        self::assertCount(1, $this->transport->payloads);
+
+        $this->configure('enabled', false);
+        $this->app->forgetInstance(Reporter::class);
+        self::assertNull($this->app['events']->until(new Looping('database', 'default')));
+    }
+
     public function test_http_reports_at_termination_and_keeps_the_response_intact(): void
     {
         Route::get('/healthy', fn () => 'healthy');
