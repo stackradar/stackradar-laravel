@@ -58,7 +58,10 @@ final class StackRadarServiceProvider extends ServiceProvider
             }
         });
 
-        $this->app['events']->listen(Looping::class, fn () => $this->app->make(Reporter::class)->reportIfDue('queue'));
+        // Laravel pauses the worker for this loop when a Looping listener returns false.
+        $this->app['events']->listen(Looping::class, function (): void {
+            $this->app->make(Reporter::class)->reportIfDue('queue');
+        });
 
         $this->app['events']->listen([JobProcessed::class, JobExceptionOccurred::class], function (object $event): void {
             if ($this->app['config']->get('queue.connections.'.$event->connectionName.'.driver') !== 'sync') {
