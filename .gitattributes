@@ -5,3 +5,6 @@
 /.github export-ignore
 /.gitignore export-ignore
 /.gitattributes export-ignore
+/AGENTS.md export-ignore
+/CLAUDE.md export-ignore
+/SECURITY.md export-ignore

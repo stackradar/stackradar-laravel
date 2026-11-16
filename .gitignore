@@ -4,3 +4,10 @@
 /composer.local.lock
 /.phpunit.cache/
 /.phpunit.result.cache
+
+# Local agent configuration
+CLAUDE.local.md
+AGENTS.override.md
+.claude/settings.local.json
+.claude/skills/
+.agents/
