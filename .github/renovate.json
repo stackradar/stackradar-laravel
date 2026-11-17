@@ -1,0 +1,63 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "dependencyDashboard": false,
+  "timezone": "Europe/Riga",
+  "labels": [
+    "semver:chore"
+  ],
+  "minimumReleaseAge": "7 days",
+  "packageRules": [
+    {
+      "description": "Group GitHub Actions updates, including digest refreshes.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Update the Renovate runner image together with the GitHub Actions.",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDepNames": [
+        "ghcr.io/renovatebot/renovate"
+      ],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "A library with no lock file: CI already installs the newest versions inside each range, so only widen a range when a new major falls outside it.",
+      "matchManagers": [
+        "composer"
+      ],
+      "rangeStrategy": "widen"
+    },
+    {
+      "description": "The supported PHP versions are changed by hand, together with the CI matrix.",
+      "matchManagers": [
+        "composer"
+      ],
+      "matchDepNames": [
+        "php"
+      ],
+      "enabled": false
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update the pinned Renovate runner image tag and digest.",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/renovate\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "renovate-image:\\s*['\"](?<depName>ghcr\\.io/renovatebot/renovate)['\"]\\s*\\n\\s+renovate-version:\\s*['\"](?<currentValue>[^@'\"]+)@(?<currentDigest>sha256:[a-f0-9]{64})['\"]"
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    }
+  ]
+}
